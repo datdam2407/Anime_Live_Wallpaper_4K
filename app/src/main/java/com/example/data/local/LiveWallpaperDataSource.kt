@@ -40,8 +40,8 @@ class LiveWallpaperDataSource(
     ): LivePageResult {
         val normalizedQuery = normalize(query)
         val isAllQuery = normalizedQuery.isEmpty() ||
-            normalizedQuery == "hometrending" ||
-            normalizedQuery == "anime"
+                normalizedQuery == "hometrending" ||
+                normalizedQuery == "anime"
 
         val filtered = if (isAllQuery) {
             cachedItems
@@ -51,22 +51,23 @@ class LiveWallpaperDataSource(
             }
         }
 
-        val mapped = filtered.map { it.toAppWallpaper() }
         val safePage = page.coerceAtLeast(1)
         val safeSize = pageSize.coerceIn(1, 50)
+        val totalCount = filtered.size
         val fromIndex = (safePage - 1) * safeSize
-        if (fromIndex >= mapped.size) {
+        if (fromIndex >= totalCount) {
             return LivePageResult(
                 items = emptyList(),
                 hasMore = false,
-                totalCount = mapped.size,
+                totalCount = totalCount,
             )
         }
-        val toIndex = minOf(fromIndex + safeSize, mapped.size)
+        val toIndex = minOf(fromIndex + safeSize, totalCount)
+        val pageItems = filtered.subList(fromIndex, toIndex).map { it.toAppWallpaper() }
         return LivePageResult(
-            items = mapped.subList(fromIndex, toIndex),
-            hasMore = toIndex < mapped.size,
-            totalCount = mapped.size,
+            items = pageItems,
+            hasMore = toIndex < totalCount,
+            totalCount = totalCount,
         )
     }
 

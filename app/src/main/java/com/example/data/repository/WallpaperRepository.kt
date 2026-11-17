@@ -129,6 +129,17 @@ class WallpaperRepository(
         wallpaperDao.clearAllCache()
     }
 
+    suspend fun pruneExpiredCache(nowMillis: Long = System.currentTimeMillis()) = withContext(Dispatchers.IO) {
+        try {
+            val cutoffMillis = nowMillis - CACHE_TTL_MILLIS
+            wallpaperDao.pruneExpiredCache(cutoffMillis)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            runCatching { Log.w(TAG, "Failed to prune expired cache: ${e.message}", e) }
+        }
+    }
+
     suspend fun warmupLiveCatalog() = withContext(Dispatchers.IO) {
         liveWallpaperDataSource.getAllParsedItems()
     }
@@ -503,7 +514,7 @@ class WallpaperRepository(
             combined.add(
                 AppWallpaper(
                     id = "wh_${item.id}",
-                    title = "$displaySeries • item.dimensionX×{item.dimensionY}",
+                    title = "$displaySeries • ${item.dimensionX}×${item.dimensionY}",
                     animeSeries = displaySeries,
                     imageUrl = safeImageUrl,
                     thumbnailUrl = safeThumbUrl,
@@ -844,7 +855,7 @@ class WallpaperRepository(
         page: Int,
     ): String {
         val type = if (isLive) "live" else "static"
-        return "type:{query.lowercase()}:filter.resolution.name:{filter.sort.name}:filter.ratio.name:ppage"
+        return "$type:${query.lowercase()}:${filter.resolution.name}:${filter.sort.name}:${filter.ratio.name}:p$page"
     }
 
     private fun CachedWallpaperEntity.toDomain(): AppWallpaper = AppWallpaper(
@@ -876,4 +887,3 @@ class WallpaperRepository(
             positionIndex = index,
         )
 }
-

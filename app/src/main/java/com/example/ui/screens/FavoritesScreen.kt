@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,27 +39,31 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.domain.model.AppWallpaper
 import com.example.ui.components.WallpaperStaggeredCard
+import com.example.ui.navigation.DetailRoute
 import com.example.ui.theme.CrimsonBlade
 import com.example.ui.theme.InkMuted
 import com.example.ui.theme.InkWhite
 import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.ObsidianVoid
 
-private enum class FavoriteTab(val label: String) {
-    ALL("All"),
-    STATIC("4K Artworks"),
-    LIVE("Live wallpapers"),
+private enum class FavoriteTab(
+    val label: String,
+    val feedSource: String,
+) {
+    ALL("All", DetailRoute.FEED_FAVORITES),
+    STATIC("4K Artworks", DetailRoute.FEED_FAVORITES_STATIC),
+    LIVE("Live wallpapers", DetailRoute.FEED_FAVORITES_LIVE),
 }
 
 @Composable
 fun FavoritesScreen(
     favorites: List<AppWallpaper>,
-    onOpenDetail: (Int) -> Unit,
+    onOpenDetail: (Int, String) -> Unit,
     onToggleFavorite: (AppWallpaper) -> Unit,
     onExploreClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var selectedTab by remember { mutableStateOf(FavoriteTab.ALL) }
+    var selectedTab by rememberSaveable { mutableStateOf(FavoriteTab.ALL) }
     val filtered = remember(favorites, selectedTab) {
         when (selectedTab) {
             FavoriteTab.ALL -> favorites
@@ -177,13 +182,11 @@ fun FavoritesScreen(
                     itemsIndexed(
                         items = filtered,
                         key = { _, item -> item.id },
-                    ) { _, wallpaper ->
-                        val originalIndex = favorites.indexOfFirst { it.id == wallpaper.id }
-                            .coerceAtLeast(0)
+                    ) { filteredIndex, wallpaper ->
                         WallpaperStaggeredCard(
                             wallpaper = wallpaper,
                             staggeredRatio = wallpaper.aspectRatio,
-                            onClick = { onOpenDetail(originalIndex) },
+                            onClick = { onOpenDetail(filteredIndex, selectedTab.feedSource) },
                             onToggleFavorite = { onToggleFavorite(wallpaper) },
                         )
                     }

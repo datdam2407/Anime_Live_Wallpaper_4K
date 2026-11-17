@@ -50,10 +50,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -106,11 +109,16 @@ import com.example.ui.theme.ObsidianSurfaceHighest
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.PremiumGold
 import com.example.ui.theme.SilverMetallic
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 @Composable
 fun HomeScreen(
     uiState: HomeUiState,
+    favoriteIdsState: State<Set<String>>,
     onSearchInputChange: (String) -> Unit,
     onSubmitSearch: () -> Unit,
     onSelectTrendingTopic: (String) -> Unit,
@@ -166,6 +174,18 @@ fun HomeScreen(
                 onSelectTab = onSelectTab,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
             )
+
+            val gridEntries = remember(uiState.feedStatus) {
+                val items = (uiState.feedStatus as? FeedStatus.Success)?.items.orEmpty()
+                if (items.isEmpty()) {
+                    emptyList()
+                } else {
+                    buildFeedWithNativeAds(
+                        wallpapers = items,
+                        interval = AdMobConstants.GRID_NATIVE_AD_INTERVAL,
+                    )
+                }
+            }
 
             // Body: Auto-scrolling Trending Carousel + Trending Chips + Staggered Grid
             LazyVerticalStaggeredGrid(
@@ -237,10 +257,6 @@ fun HomeScreen(
                     }
 
                     is FeedStatus.Success -> {
-                        val gridEntries = buildFeedWithNativeAds(
-                            wallpapers = status.items,
-                            interval = AdMobConstants.GRID_NATIVE_AD_INTERVAL,
-                        )
                         itemsIndexed(
                             items = gridEntries,
                             key = { _, entry ->
@@ -281,9 +297,13 @@ fun HomeScreen(
                                             else -> wallpaper.aspectRatio.coerceIn(0.62f, 0.74f)
                                         }
                                     }
+                                    val isFavorite by remember(wallpaper.id, favoriteIdsState) {
+                                        derivedStateOf { wallpaper.id in favoriteIdsState.value }
+                                    }
                                     WallpaperStaggeredCard(
                                         wallpaper = wallpaper,
                                         staggeredRatio = staggeredRatio,
+                                        isFavorite = isFavorite,
                                         onClick = { onOpenDetail(index) },
                                         onToggleFavorite = { onToggleFavorite(wallpaper) },
                                     )
@@ -546,13 +566,21 @@ private fun TrendingCarouselBanner(
 ) {
     val pageCount = if (banners.isNotEmpty()) banners.size else AnimeCatalog.trendingTopics.size
     val pagerState = rememberPagerState(pageCount = { pageCount })
+    val lifecycleOwner = LocalLifecycleOwner.current
 
-    LaunchedEffect(pageCount) {
+    LaunchedEffect(pagerState, pageCount, lifecycleOwner) {
         if (pageCount <= 1) return@LaunchedEffect
-        while (true) {
-            delay(4000)
-            val next = (pagerState.currentPage + 1) % pageCount
-            pagerState.animateScrollToPage(next)
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            snapshotFlow { pagerState.isScrollInProgress }
+                .collectLatest { isScrolling ->
+                    if (!isScrolling) {
+                        while (true) {
+                            delay(4000L)
+                            val next = (pagerState.currentPage + 1) % pageCount
+                            pagerState.animateScrollToPage(next)
+                        }
+                    }
+                }
         }
     }
 
@@ -658,9 +686,9 @@ private fun TrendingCarouselBanner(
                     Text(
                         text = banner?.animeSeries?.takeIf {
                             it.isNotBlank() &&
-                                !it.equals("anime", true) &&
-                                !it.equals("Trending Anime", true) &&
-                                !it.equals("Hot Anime", true)
+                                    !it.equals("anime", true) &&
+                                    !it.equals("Trending Anime", true) &&
+                                    !it.equals("Hot Anime", true)
                         } ?: topicTitle,
                         style = MaterialTheme.typography.headlineMedium,
                         color = InkWhite,
@@ -738,7 +766,7 @@ private fun TrendingTopicChips(
                 key = { it.title },
             ) { topic ->
                 val selected = activeQuery.equals(topic.title, ignoreCase = true) ||
-                    activeQuery.equals(topic.query, ignoreCase = true)
+                        activeQuery.equals(topic.query, ignoreCase = true)
                 Surface(
                     color = if (selected) CrimsonBlade else ObsidianSurfaceElevated,
                     shape = RoundedCornerShape(50),

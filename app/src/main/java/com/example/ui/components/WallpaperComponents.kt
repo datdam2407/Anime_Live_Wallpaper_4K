@@ -156,6 +156,7 @@ fun PremiumGoldBadge(
 fun WallpaperStaggeredCard(
     wallpaper: AppWallpaper,
     staggeredRatio: Float,
+    isFavorite: Boolean = wallpaper.isFavorite,
     onClick: () -> Unit,
     onToggleFavorite: () -> Unit,
     modifier: Modifier = Modifier,
@@ -294,17 +295,17 @@ fun WallpaperStaggeredCard(
                 .testTag("card_favorite_${wallpaper.id}"),
         ) {
             Icon(
-                imageVector = if (wallpaper.isFavorite) {
+                imageVector = if (isFavorite) {
                     Icons.Rounded.Favorite
                 } else {
                     Icons.Rounded.FavoriteBorder
                 },
-                contentDescription = if (wallpaper.isFavorite) {
+                contentDescription = if (isFavorite) {
                     "Remove from favorites"
                 } else {
                     "Save to favorites"
                 },
-                tint = if (wallpaper.isFavorite) CrimsonBlade else InkWhite.copy(alpha = 0.92f),
+                tint = if (isFavorite) CrimsonBlade else InkWhite.copy(alpha = 0.92f),
                 modifier = Modifier.size(20.dp),
             )
         }

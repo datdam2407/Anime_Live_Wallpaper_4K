@@ -1,6 +1,5 @@
 package com.example
 
-
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
@@ -109,7 +108,6 @@ import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.ObsidianVoid
 import com.example.util.LiveWallpaperHelper
 
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -125,14 +123,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-
 private data class TopLevelDestination(
     val route: Any,
     val labelRes: Int,
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector,
 )
-
 
 @Composable
 private fun KuroWallAppRoot(
@@ -151,18 +147,15 @@ private fun KuroWallAppRoot(
         (context.applicationContext as KuroWallApplication).container.nativeAdManager
     }
 
-
     val homeState by viewModel.homeState.collectAsStateWithLifecycle()
     val categories by viewModel.filteredCategories.collectAsStateWithLifecycle()
     val categoryFilterText by viewModel.categoryFilterText.collectAsStateWithLifecycle()
     val favorites by viewModel.favorites.collectAsStateWithLifecycle()
-    val favoriteIds by viewModel.favoriteIds.collectAsStateWithLifecycle()
+    val favoriteIdsState = viewModel.favoriteIds.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-
 
     var pendingLiveWallpaperComponent by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingLiveWallpaperTarget by rememberSaveable { mutableStateOf(WallpaperTarget.BOTH.name) }
-
 
     val liveWallpaperLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -183,7 +176,6 @@ private fun KuroWallAppRoot(
         }
     }
 
-
     fun launchAlternatingLiveWallpaperPicker(target: WallpaperTarget = WallpaperTarget.BOTH) {
         val targetComponent = LiveWallpaperHelper.getNextLiveWallpaperComponent(context)
         pendingLiveWallpaperComponent = targetComponent.flattenToString()
@@ -201,19 +193,16 @@ private fun KuroWallAppRoot(
         }
     }
 
-
     LaunchedEffect(interstitialAdManager, nativeAdManager) {
         interstitialAdManager.preload(context)
         nativeAdManager.preloadBuffer()
     }
-
 
     DisposableEffect(nativeAdManager) {
         onDispose {
             nativeAdManager.clearBuffer()
         }
     }
-
 
     LaunchedEffect(interstitialAdManager) {
         viewModel.events.collect { event ->
@@ -267,7 +256,6 @@ private fun KuroWallAppRoot(
         }
     }
 
-
     val topDestinations = remember {
         listOf(
             TopLevelDestination(HomeRoute, R.string.nav_home, Icons.Rounded.Explore, Icons.Outlined.Explore),
@@ -277,10 +265,8 @@ private fun KuroWallAppRoot(
         )
     }
 
-
     val isFullScreenRoute = currentDestination?.hasRoute<SplashRoute>() == true ||
             currentDestination?.hasRoute<DetailRoute>() == true
-
 
     fun navigateTopLevel(route: Any) {
         navController.navigate(route) {
@@ -292,10 +278,8 @@ private fun KuroWallAppRoot(
         }
     }
 
-
     val configuration = LocalConfiguration.current
     val useNavigationRail = configuration.screenWidthDp >= 600 && !isFullScreenRoute
-
 
     Box(
         modifier = Modifier
@@ -366,7 +350,6 @@ private fun KuroWallAppRoot(
                             }
                         }
 
-
                         AdaptiveBannerAd(
                             adUnitId = AdMobConstants.TEST_ADAPTIVE_BANNER_UNIT_ID,
                             topSafeMargin = 10.dp,
@@ -408,7 +391,6 @@ private fun KuroWallAppRoot(
                     }
                 }
 
-
                 Column(modifier = Modifier.weight(1f).fillMaxSize()) {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         NavHost(
@@ -436,7 +418,6 @@ private fun KuroWallAppRoot(
                                 )
                             }
 
-
                             composable<HomeRoute>(
                                 enterTransition = {
                                     if (initialState.destination.hasRoute<SplashRoute>()) {
@@ -452,6 +433,7 @@ private fun KuroWallAppRoot(
                             ) {
                                 HomeScreen(
                                     uiState = homeState,
+                                    favoriteIdsState = favoriteIdsState,
                                     onSearchInputChange = viewModel::onSearchInputChange,
                                     onSubmitSearch = { viewModel.submitSearch() },
                                     onSelectTrendingTopic = viewModel::selectTrendingTopic,
@@ -471,7 +453,6 @@ private fun KuroWallAppRoot(
                                 )
                             }
 
-
                             composable<CategoriesRoute> {
                                 CategoriesScreen(
                                     categories = categories,
@@ -485,15 +466,14 @@ private fun KuroWallAppRoot(
                                 )
                             }
 
-
                             composable<FavoritesRoute> {
                                 FavoritesScreen(
                                     favorites = favorites,
-                                    onOpenDetail = { index ->
+                                    onOpenDetail = { index, feedSource ->
                                         navController.navigate(
                                             DetailRoute(
                                                 startIndex = index,
-                                                feedSource = DetailRoute.FEED_FAVORITES,
+                                                feedSource = feedSource,
                                             ),
                                         )
                                     },
@@ -501,7 +481,6 @@ private fun KuroWallAppRoot(
                                     onExploreClick = { navigateTopLevel(HomeRoute) },
                                 )
                             }
-
 
                             composable<SettingsRoute> {
                                 SettingsScreen(
@@ -524,7 +503,6 @@ private fun KuroWallAppRoot(
                                     onSubmitWallpaperRequest = viewModel::submitWallpaperRequest,
                                 )
                             }
-
 
                             composable<DetailRoute>(
                                 enterTransition = {
@@ -549,7 +527,7 @@ private fun KuroWallAppRoot(
                                 DetailPreviewScreen(
                                     wallpapers = feed,
                                     initialIndex = route.startIndex,
-                                    favoriteIds = favoriteIds,
+                                    favoriteIdsState = favoriteIdsState,
                                     isProcessing = homeState.isProcessingAction,
                                     processingLabel = homeState.processingLabel,
                                     liveDownloadProgress = homeState.liveDownloadProgress,

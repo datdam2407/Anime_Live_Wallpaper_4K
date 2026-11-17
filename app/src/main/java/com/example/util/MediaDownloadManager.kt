@@ -295,5 +295,3 @@ class MediaDownloadManager(
         result
     }
 }
-
-

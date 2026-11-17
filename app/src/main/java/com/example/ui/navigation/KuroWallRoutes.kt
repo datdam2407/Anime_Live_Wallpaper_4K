@@ -25,5 +25,7 @@ data class DetailRoute(
     companion object {
         const val FEED_MAIN = "MAIN"
         const val FEED_FAVORITES = "FAVORITES"
+        const val FEED_FAVORITES_STATIC = "FAVORITES_STATIC"
+        const val FEED_FAVORITES_LIVE = "FAVORITES_LIVE"
     }
 }

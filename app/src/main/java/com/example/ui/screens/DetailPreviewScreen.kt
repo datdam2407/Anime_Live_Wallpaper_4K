@@ -62,6 +62,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -99,6 +100,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import coil.compose.rememberAsyncImagePainter
 import coil.imageLoader
 import coil.request.CachePolicy
 import coil.request.ImageRequest
@@ -134,7 +136,7 @@ import kotlin.math.absoluteValue
 fun DetailPreviewScreen(
     wallpapers: List<AppWallpaper>,
     initialIndex: Int,
-    favoriteIds: Set<String>,
+    favoriteIdsState: State<Set<String>>,
     isProcessing: Boolean, // Giữ lại để chặn click đúp
     processingLabel: String?,
     liveDownloadProgress: Int? = null,
@@ -269,7 +271,7 @@ fun DetailPreviewScreen(
 
     fun triggerSetWallpaper(wallpaper: AppWallpaper) {
         // Vẫn chặn nếu đang processing ngầm để tránh người dùng nhấn 2-3 lần liên tiếp gây crash
-        if (isProcessing) return 
+        if (isProcessing) return
 
 
         if (wallpaper.isLive) {
@@ -460,7 +462,9 @@ fun DetailPreviewScreen(
                     when (entry) {
                         is DetailPagerEntry.WallpaperPage -> {
                             val item = entry.wallpaper
-                            val itemIsFavorite = item.id in favoriteIds
+                            val itemIsFavorite by remember(item.id, favoriteIdsState) {
+                                derivedStateOf { item.id in favoriteIdsState.value }
+                            }
                             CarouselWallpaperCard(
                                 item = item,
                                 isActive = isCurrentPage,
@@ -940,15 +944,15 @@ private fun WallpaperMediaContent(
             }
 
 
-            AsyncImage(
+            val thumbPainter = rememberAsyncImagePainter(
                 model = thumbRequest,
-                contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
             )
             AsyncImage(
                 model = fullRequest,
                 contentDescription = "${item.title} full resolution preview",
+                placeholder = thumbPainter,
+                error = thumbPainter,
                 contentScale = ContentScale.Crop,
                 onSuccess = { isHighResLoading = false },
                 onError = { isHighResLoading = false },
@@ -1064,7 +1068,7 @@ private fun ActiveExoPlayerOverlay(
             @Suppress("DEPRECATION")
             wm.defaultDisplay?.getRealMetrics(metrics)
             (metrics.widthPixels.takeIf { it > 0 } ?: 1080) to
-                (metrics.heightPixels.takeIf { it > 0 } ?: 1920)
+                    (metrics.heightPixels.takeIf { it > 0 } ?: 1920)
         }
     }
 
@@ -1187,7 +1191,7 @@ private fun WallpaperTargetDialog(
                 TargetOptionRow(
                     icon = Icons.Rounded.Home,
                     label = WallpaperTarget.HOME.label,
-                    onClick = { onSelectTarget(WallpaperTarget.HOME) }, 
+                    onClick = { onSelectTarget(WallpaperTarget.HOME) },
                 )
                 TargetOptionRow(
                     icon = Icons.Rounded.Lock,

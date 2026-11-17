@@ -67,4 +67,23 @@ interface WallpaperDao {
         clearAllCachedWallpapers()
         clearAllCacheMeta()
     }
+
+    @Query(
+        """
+        DELETE FROM cached_wallpapers
+        WHERE cacheKey NOT IN (
+            SELECT cacheKey FROM query_cache_meta WHERE fetchedAtMillis >= :cutoffMillis
+        )
+        """,
+    )
+    suspend fun deleteExpiredCachedWallpapers(cutoffMillis: Long)
+
+    @Query("DELETE FROM query_cache_meta WHERE fetchedAtMillis < :cutoffMillis")
+    suspend fun deleteExpiredCacheMeta(cutoffMillis: Long)
+
+    @Transaction
+    suspend fun pruneExpiredCache(cutoffMillis: Long) {
+        deleteExpiredCachedWallpapers(cutoffMillis)
+        deleteExpiredCacheMeta(cutoffMillis)
+    }
 }

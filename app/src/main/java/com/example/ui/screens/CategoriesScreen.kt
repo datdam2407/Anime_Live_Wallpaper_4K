@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -33,22 +36,26 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.example.KuroWallApplication
 import com.kuroanimelivewallpapers.app.R
 import com.example.ads.CategoryGridEntry
@@ -83,6 +90,13 @@ fun CategoriesScreen(
     }
     val gridEntries = remember(categories) {
         buildCategoriesWithProgressiveAds(categories)
+    }
+    // Pre-blur the shared cover bitmap once off the main thread instead of running
+    // Modifier.blur() GPU passes on 200 grid cards during scroll.
+    val blurredCover by produceState<ImageBitmap?>(initialValue = null, key1 = context) {
+        value = withContext(Dispatchers.Default) {
+            createBlurredCategoryCover(context)
+        }
     }
 
     LaunchedEffect(resolvedAdManager) {
@@ -211,6 +225,7 @@ fun CategoriesScreen(
                         is CategoryGridEntry.CategoryItem -> {
                             AnimeCategoryCard(
                                 category = entry.category,
+                                blurredCover = blurredCover,
                                 onClick = { onCategoryClick(entry.category) },
                             )
                         }
@@ -233,6 +248,7 @@ fun CategoriesScreen(
 @Composable
 private fun AnimeCategoryCard(
     category: AnimeCategory,
+    blurredCover: ImageBitmap?,
     onClick: () -> Unit,
 ) {
     val accentColor = Color(category.accentHex)
@@ -249,15 +265,15 @@ private fun AnimeCategoryCard(
             .testTag("category_card_${category.id}"),
         contentAlignment = Alignment.Center,
     ) {
-        // Static bundled cover art with blur — zero API calls on scroll
-        Image(
-            painter = painterResource(id = R.drawable.img_hero_anime_night),
-            contentDescription = "${category.title} stylized cover",
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .fillMaxSize()
-                .blur(14.dp),
-        )
+        // Shared pre-blurred cover bitmap — zero GPU blur passes and zero API calls on scroll
+        if (blurredCover != null) {
+            Image(
+                bitmap = blurredCover,
+                contentDescription = "${category.title} stylized cover",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         Box(
             modifier = Modifier
@@ -285,4 +301,105 @@ private fun AnimeCategoryCard(
                 .padding(horizontal = 14.dp),
         )
     }
+}
+
+private fun createBlurredCategoryCover(context: Context): ImageBitmap? {
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = 4
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    val decoded = BitmapFactory.decodeResource(
+        context.resources,
+        R.drawable.img_hero_anime_night,
+        options,
+    ) ?: return null
+
+    val targetW = 128
+    val targetH = 80
+    val scaled = if (decoded.width != targetW || decoded.height != targetH) {
+        Bitmap.createScaledBitmap(decoded, targetW, targetH, true).also {
+            if (it !== decoded) decoded.recycle()
+        }
+    } else {
+        decoded
+    }
+
+    val blurred = fastBoxBlur(scaled, radius = 4, passes = 2)
+    if (blurred !== scaled) scaled.recycle()
+    return blurred.asImageBitmap()
+}
+
+private fun fastBoxBlur(source: Bitmap, radius: Int, passes: Int): Bitmap {
+    val w = source.width
+    val h = source.height
+    if (w <= 0 || h <= 0 || radius <= 0) return source
+
+    val total = w * h
+    var src = IntArray(total)
+    var dst = IntArray(total)
+    source.getPixels(src, 0, w, 0, 0, w, h)
+
+    val windowSize = radius * 2 + 1
+    repeat(passes) {
+        // Horizontal pass
+        for (y in 0 until h) {
+            val rowOffset = y * w
+            var aSum = 0
+            var rSum = 0
+            var gSum = 0
+            var bSum = 0
+            for (dx in -radius..radius) {
+                val px = src[rowOffset + dx.coerceIn(0, w - 1)]
+                aSum += (px ushr 24) and 0xFF
+                rSum += (px ushr 16) and 0xFF
+                gSum += (px ushr 8) and 0xFF
+                bSum += px and 0xFF
+            }
+            for (x in 0 until w) {
+                dst[rowOffset + x] =
+                    ((aSum / windowSize) shl 24) or
+                            ((rSum / windowSize) shl 16) or
+                            ((gSum / windowSize) shl 8) or
+                            (bSum / windowSize)
+
+                val outPx = src[rowOffset + (x - radius).coerceIn(0, w - 1)]
+                val inPx = src[rowOffset + (x + radius + 1).coerceIn(0, w - 1)]
+                aSum += ((inPx ushr 24) and 0xFF) - ((outPx ushr 24) and 0xFF)
+                rSum += ((inPx ushr 16) and 0xFF) - ((outPx ushr 16) and 0xFF)
+                gSum += ((inPx ushr 8) and 0xFF) - ((outPx ushr 8) and 0xFF)
+                bSum += (inPx and 0xFF) - (outPx and 0xFF)
+            }
+        }
+
+        // Vertical pass
+        for (x in 0 until w) {
+            var aSum = 0
+            var rSum = 0
+            var gSum = 0
+            var bSum = 0
+            for (dy in -radius..radius) {
+                val px = dst[dy.coerceIn(0, h - 1) * w + x]
+                aSum += (px ushr 24) and 0xFF
+                rSum += (px ushr 16) and 0xFF
+                gSum += (px ushr 8) and 0xFF
+                bSum += px and 0xFF
+            }
+            for (y in 0 until h) {
+                src[y * w + x] =
+                    ((aSum / windowSize) shl 24) or
+                            ((rSum / windowSize) shl 16) or
+                            ((gSum / windowSize) shl 8) or
+                            (bSum / windowSize)
+
+                val outPx = dst[(y - radius).coerceIn(0, h - 1) * w + x]
+                val inPx = dst[(y + radius + 1).coerceIn(0, h - 1) * w + x]
+                aSum += ((inPx ushr 24) and 0xFF) - ((outPx ushr 24) and 0xFF)
+                rSum += ((inPx ushr 16) and 0xFF) - ((outPx ushr 16) and 0xFF)
+                gSum += ((inPx ushr 8) and 0xFF) - ((outPx ushr 8) and 0xFF)
+                bSum += (inPx and 0xFF) - (outPx and 0xFF)
+            }
+        }
+    }
+
+    return Bitmap.createBitmap(src, w, h, Bitmap.Config.ARGB_8888)
 }
