@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
@@ -57,6 +58,7 @@ import com.example.ui.theme.ObsidianVoid
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+
 // Wallhaven https://wallhaven.cc/w/5g12j5
 const val SPLASH_WALLPAPER_THUMB_URL =
     "https://th.wallhaven.cc/lg/5g/5g12j5.jpg"
@@ -65,12 +67,15 @@ const val SPLASH_WALLPAPER_JPG_URL =
 const val SPLASH_WALLPAPER_PNG_URL =
     "https://w.wallhaven.cc/full/5g/wallhaven-5g12j5.png"
 
-private const val MIN_SPLASH_DURATION_MS = 3_200L
-private const val MAX_SPLASH_WAIT_MS = 5_000L
+
+const val SPLASH_DURATION_MS = 5_000L
+private const val SPLASH_HANDOFF_ANIMATION_MS = 400L
+private const val SPLASH_PRELOAD_WINDOW_MS = SPLASH_DURATION_MS - SPLASH_HANDOFF_ANIMATION_MS
+
 
 @Composable
 fun SplashScreen(
-    isPreloadComplete: Boolean = true,
+    isPreloadComplete: Boolean = false,
     onFinished: () -> Unit,
 ) {
     val contentAlpha = remember { Animatable(0f) }
@@ -78,49 +83,57 @@ fun SplashScreen(
     val progress = remember { Animatable(0.08f) }
     val imageZoom = remember { Animatable(1.0f) }
 
+
     val latestPreloadComplete by rememberUpdatedState(isPreloadComplete)
     val latestOnFinished by rememberUpdatedState(onFinished)
+
 
     LaunchedEffect(Unit) {
         val startedAt = System.currentTimeMillis()
         launch {
             imageZoom.animateTo(
                 targetValue = 1.08f,
-                animationSpec = tween(durationMillis = 4_800, easing = LinearOutSlowInEasing),
+                animationSpec = tween(durationMillis = SPLASH_DURATION_MS.toInt(), easing = LinearOutSlowInEasing),
             )
         }
         contentAlpha.animateTo(1f, animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing))
-        progress.animateTo(0.45f, animationSpec = tween(durationMillis = 1_100, easing = FastOutSlowInEasing))
+        progress.animateTo(0.38f, animationSpec = tween(durationMillis = 900, easing = FastOutSlowInEasing))
 
+
+        // Hold inside the 5-second preload window while initial API feed, thumbnails, and Ads warm up
         while (true) {
             val elapsed = System.currentTimeMillis() - startedAt
-            val ready = latestPreloadComplete && elapsed >= MIN_SPLASH_DURATION_MS
-            val timedOut = elapsed >= MAX_SPLASH_WAIT_MS
-            if (ready || timedOut) {
+            if (elapsed >= SPLASH_PRELOAD_WINDOW_MS) {
                 break
             }
-            val crept = if (latestPreloadComplete) {
-                (0.45f + (elapsed.toFloat() / MIN_SPLASH_DURATION_MS) * 0.49f).coerceAtMost(0.94f)
+            val fraction = (elapsed.toFloat() / SPLASH_PRELOAD_WINDOW_MS.toFloat()).coerceIn(0f, 1f)
+            val targetProgress = if (latestPreloadComplete) {
+                (0.38f + fraction * 0.56f).coerceAtMost(0.94f)
             } else {
-                (0.45f + (elapsed.toFloat() / MAX_SPLASH_WAIT_MS) * 0.43f).coerceAtMost(0.88f)
+                (0.38f + fraction * 0.50f).coerceAtMost(0.88f)
             }
-            if (crept > progress.value) {
-                progress.snapTo(crept)
+            if (targetProgress > progress.value) {
+                progress.snapTo(targetProgress)
             }
-            delay(80L)
+            delay(50L)
         }
 
+
         progress.animateTo(1f, animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing))
-        // Smooth pre-handoff flourish: fade HUD cleanly while gently zooming artwork into NavHost cross-dissolve
+        // Smooth pre-handoff flourish during the final ~160ms of the 5,000ms window
         launch {
-            hudAlpha.animateTo(0f, animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing))
+            hudAlpha.animateTo(0f, animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing))
         }
         launch {
-            imageZoom.animateTo(1.10f, animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing))
+            imageZoom.animateTo(1.10f, animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing))
         }
-        delay(160L)
+        val remainingMs = (SPLASH_DURATION_MS - (System.currentTimeMillis() - startedAt)).coerceAtLeast(0L)
+        if (remainingMs > 0L) {
+            delay(remainingMs)
+        }
         latestOnFinished()
     }
+
 
     val context = LocalContext.current
     val fullResCandidates = remember {
@@ -132,6 +145,7 @@ fun SplashScreen(
     }
     var candidateIndex by remember { mutableIntStateOf(0) }
     val activeFullUrl = fullResCandidates[candidateIndex.coerceAtMost(fullResCandidates.lastIndex)]
+
 
     val thumbRequest = remember(context) {
         ImageRequest.Builder(context)
@@ -145,6 +159,7 @@ fun SplashScreen(
             .build()
     }
 
+
     val fullRequest = remember(context, activeFullUrl) {
         ImageRequest.Builder(context)
             .data(activeFullUrl)
@@ -157,6 +172,7 @@ fun SplashScreen(
             .crossfade(220)
             .build()
     }
+
 
     Box(
         modifier = Modifier
@@ -178,6 +194,7 @@ fun SplashScreen(
                     ),
                 ),
         )
+
 
         // Subtle Ken Burns zoom motion on Wallhaven 5g12j5 artwork
         Box(
@@ -204,6 +221,7 @@ fun SplashScreen(
             )
         }
 
+
         // Top atmospheric gradient scrim so title & progress bar remain sharp and high-contrast
         Box(
             modifier = Modifier
@@ -221,6 +239,7 @@ fun SplashScreen(
                 ),
         )
 
+
         // Bottom atmospheric gradient scrim framing "Loading..." cleanly
         Box(
             modifier = Modifier
@@ -237,6 +256,7 @@ fun SplashScreen(
                     ),
                 ),
         )
+
 
         // Top title & glowing horizontal loading bar
         Column(
@@ -263,7 +283,9 @@ fun SplashScreen(
                 modifier = Modifier.testTag("splash_headline"),
             )
 
+
             Spacer(modifier = Modifier.height(6.dp))
+
 
             Text(
                 text = stringResource(id = R.string.app_name),
@@ -274,7 +296,9 @@ fun SplashScreen(
                 textAlign = TextAlign.Center,
             )
 
+
             Spacer(modifier = Modifier.height(18.dp))
+
 
             Box(
                 modifier = Modifier
@@ -308,6 +332,7 @@ fun SplashScreen(
             }
         }
 
+
         // Bottom "Loading..." label
         Text(
             text = stringResource(id = R.string.splash_loading),
@@ -330,3 +355,6 @@ fun SplashScreen(
         )
     }
 }
+
+
+

@@ -1,5 +1,11 @@
 package com.example.ui.screens
 
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -11,6 +17,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,6 +30,7 @@ import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
 import androidx.compose.foundation.lazy.staggeredgrid.itemsIndexed
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -31,6 +39,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Image
@@ -42,6 +51,8 @@ import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -53,8 +64,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -114,6 +128,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
+
 
 @Composable
 fun HomeScreen(
@@ -133,6 +150,7 @@ fun HomeScreen(
     var showFilterSheet by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
 
+
     if (showFilterSheet) {
         FilterBottomSheet(
             currentFilter = uiState.filter,
@@ -140,6 +158,7 @@ fun HomeScreen(
             onApply = onApplyFilter,
         )
     }
+
 
     BoxWithConstraints(
         modifier = modifier
@@ -151,6 +170,7 @@ fun HomeScreen(
             maxWidth >= 600.dp -> 3
             else -> 2
         }
+
 
         Column(modifier = Modifier.fillMaxSize()) {
             // Header: Search Bar + Filter Icon
@@ -168,12 +188,14 @@ fun HomeScreen(
                 onOpenFilter = { showFilterSheet = true },
             )
 
+
             // 2 Tabs: Static (Tĩnh) | Live (Động)
             StaticLiveTabs(
                 isLiveTab = uiState.isLiveTab,
                 onSelectTab = onSelectTab,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
             )
+
 
             val gridEntries = remember(uiState.feedStatus) {
                 val items = (uiState.feedStatus as? FeedStatus.Success)?.items.orEmpty()
@@ -187,164 +209,261 @@ fun HomeScreen(
                 }
             }
 
-            // Body: Auto-scrolling Trending Carousel + Trending Chips + Staggered Grid
-            LazyVerticalStaggeredGrid(
-                columns = StaggeredGridCells.Fixed(columnCount),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalItemSpacing = 12.dp,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("home_staggered_grid"),
+
+            val gridState = rememberLazyStaggeredGridState()
+            val currentFeedCountState = rememberUpdatedState(
+                (uiState.feedStatus as? FeedStatus.Success)?.items?.size ?: 0,
+            )
+            val canLoadMoreState = rememberUpdatedState(uiState.hasMore && !uiState.isLoadingMore)
+            var lastLoadMoreTriggeredAtCount by remember(
+                uiState.activeQuery,
+                uiState.isLiveTab,
+                uiState.filter,
             ) {
-                item(span = StaggeredGridItemSpan.FullLine) {
-                    TrendingCarouselBanner(
-                        banners = uiState.trendingBanners,
-                        onBannerClick = { index, banner ->
-                            if (banner != null && uiState.feedStatus is FeedStatus.Success) {
-                                val found = uiState.feedStatus.items.indexOfFirst { it.id == banner.id }
-                                if (found >= 0) {
-                                    onOpenDetail(found)
-                                } else {
-                                    onSelectTrendingTopic(banner.animeSeries)
-                                }
-                            } else {
-                                val topic = AnimeCatalog.trendingTopics.getOrElse(index) {
-                                    AnimeCatalog.trendingTopics.first()
-                                }
-                                onSelectTrendingTopic(topic.title)
-                            }
-                        },
-                    )
-                }
+                mutableIntStateOf(-1)
+            }
 
-                item(span = StaggeredGridItemSpan.FullLine) {
-                    TrendingTopicChips(
-                        activeQuery = uiState.activeQuery,
-                        onSelectTopic = onSelectTrendingTopic,
-                        onRefresh = onRefresh,
-                    )
-                }
 
-                if (!uiState.bannerMessage.isNullOrBlank()) {
+            LaunchedEffect(uiState.isRefreshing) {
+                if (uiState.isRefreshing) {
+                    lastLoadMoreTriggeredAtCount = -1
+                }
+            }
+
+
+            LaunchedEffect(gridState, uiState.activeQuery, uiState.isLiveTab, uiState.filter) {
+                snapshotFlow {
+                    val layoutInfo = gridState.layoutInfo
+                    val totalItems = layoutInfo.totalItemsCount
+                    val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                    val feedCount = currentFeedCountState.value
+                    val canLoadMore = canLoadMoreState.value
+                    canLoadMore &&
+                            feedCount > 0 &&
+                            totalItems > 0 &&
+                            lastVisibleIndex >= totalItems - 4 &&
+                            lastLoadMoreTriggeredAtCount != feedCount
+                }
+                    .distinctUntilChanged()
+                    .collect { shouldTrigger ->
+                        if (shouldTrigger) {
+                            lastLoadMoreTriggeredAtCount = currentFeedCountState.value
+                            onLoadMore()
+                        }
+                    }
+            }
+
+
+            val coroutineScope = rememberCoroutineScope()
+            val showScrollToTop by remember(gridState) {
+                derivedStateOf { gridState.firstVisibleItemIndex > 15 }
+            }
+
+
+            // Body: Auto-scrolling Trending Carousel + Trending Chips + Staggered Grid
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
+                LazyVerticalStaggeredGrid(
+                    state = gridState,
+                    columns = StaggeredGridCells.Fixed(columnCount),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalItemSpacing = 12.dp,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("home_staggered_grid"),
+                ) {
                     item(span = StaggeredGridItemSpan.FullLine) {
-                        RateLimitBanner(message = uiState.bannerMessage)
+                        TrendingCarouselBanner(
+                            banners = uiState.trendingBanners,
+                            onBannerClick = { index, banner ->
+                                if (banner != null && uiState.feedStatus is FeedStatus.Success) {
+                                    val found = uiState.feedStatus.items.indexOfFirst { it.id == banner.id }
+                                    if (found >= 0) {
+                                        onOpenDetail(found)
+                                    } else {
+                                        onSelectTrendingTopic(banner.animeSeries)
+                                    }
+                                } else {
+                                    val topic = AnimeCatalog.trendingTopics.getOrElse(index) {
+                                        AnimeCatalog.trendingTopics.first()
+                                    }
+                                    onSelectTrendingTopic(topic.title)
+                                }
+                            },
+                        )
                     }
-                }
 
-                when (val status = uiState.feedStatus) {
-                    FeedStatus.Loading -> {
-                        items(8) { index ->
-                            val ratio = if (index % 3 == 0) 0.56f else if (index % 2 == 0) 0.68f else 0.76f
-                            ShimmerBox(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height((220 / ratio).toInt().coerceIn(210, 320).dp)
-                                    .clip(RoundedCornerShape(18.dp)),
-                            )
-                        }
+
+                    item(span = StaggeredGridItemSpan.FullLine) {
+                        TrendingTopicChips(
+                            activeQuery = uiState.activeQuery,
+                            onSelectTopic = onSelectTrendingTopic,
+                            onRefresh = onRefresh,
+                        )
                     }
 
-                    is FeedStatus.Error -> {
+
+                    if (!uiState.bannerMessage.isNullOrBlank()) {
                         item(span = StaggeredGridItemSpan.FullLine) {
-                            EmptyFeedCard(
-                                message = status.message,
-                                isLive = uiState.isLiveTab,
-                                onRetry = onRefresh,
-                                onBrowseAll = { onSelectTrendingTopic("anime") },
-                            )
+                            RateLimitBanner(message = uiState.bannerMessage)
                         }
                     }
 
-                    is FeedStatus.Success -> {
-                        itemsIndexed(
-                            items = gridEntries,
-                            key = { _, entry ->
-                                when (entry) {
-                                    is WallpaperGridEntry.WallpaperItem -> entry.wallpaper.id
-                                    is WallpaperGridEntry.NativeAdSlot -> entry.slotKey
-                                }
-                            },
-                            span = { _, entry ->
-                                when (entry) {
-                                    is WallpaperGridEntry.NativeAdSlot -> StaggeredGridItemSpan.FullLine
-                                    is WallpaperGridEntry.WallpaperItem -> StaggeredGridItemSpan.SingleLane
-                                }
-                            },
-                        ) { _, entry ->
-                            when (entry) {
-                                is WallpaperGridEntry.NativeAdSlot -> {
-                                    NativeAdCard(
-                                        style = NativeAdStyle.GRID_CARD,
-                                        slotKey = entry.slotKey,
-                                        modifier = Modifier.fillMaxWidth(),
-                                    )
-                                }
 
-                                is WallpaperGridEntry.WallpaperItem -> {
-                                    val index = entry.originalIndex
-                                    val wallpaper = entry.wallpaper
-                                    if (index >= status.items.lastIndex - 3 && uiState.hasMore && !uiState.isLoadingMore) {
-                                        LaunchedEffect(status.items.size, uiState.isLiveTab, uiState.activeQuery) {
-                                            onLoadMore()
-                                        }
-                                    }
-                                    val staggeredRatio = remember(wallpaper.id, index) {
-                                        when (index % 4) {
-                                            0 -> wallpaper.aspectRatio.coerceIn(0.55f, 0.64f)
-                                            1 -> wallpaper.aspectRatio.coerceIn(0.68f, 0.78f)
-                                            2 -> wallpaper.aspectRatio.coerceIn(0.58f, 0.70f)
-                                            else -> wallpaper.aspectRatio.coerceIn(0.62f, 0.74f)
-                                        }
-                                    }
-                                    val isFavorite by remember(wallpaper.id, favoriteIdsState) {
-                                        derivedStateOf { wallpaper.id in favoriteIdsState.value }
-                                    }
-                                    WallpaperStaggeredCard(
-                                        wallpaper = wallpaper,
-                                        staggeredRatio = staggeredRatio,
-                                        isFavorite = isFavorite,
-                                        onClick = { onOpenDetail(index) },
-                                        onToggleFavorite = { onToggleFavorite(wallpaper) },
-                                    )
-                                }
-                            }
-                        }
-
-                        if (uiState.isLoadingMore || uiState.hasMore) {
-                            item(span = StaggeredGridItemSpan.FullLine) {
-                                Box(
+                    when (val status = uiState.feedStatus) {
+                        FeedStatus.Loading -> {
+                            items(8) { index ->
+                                val ratio = if (index % 3 == 0) 0.56f else if (index % 2 == 0) 0.68f else 0.76f
+                                ShimmerBox(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    if (uiState.isLoadingMore) {
-                                        androidx.compose.material3.CircularProgressIndicator(
-                                            color = CrimsonBlade,
-                                            modifier = Modifier.size(28.dp),
+                                        .height((220 / ratio).toInt().coerceIn(210, 320).dp)
+                                        .clip(RoundedCornerShape(18.dp)),
+                                )
+                            }
+                        }
+
+
+                        is FeedStatus.Error -> {
+                            item(span = StaggeredGridItemSpan.FullLine) {
+                                EmptyFeedCard(
+                                    message = status.message,
+                                    isLive = uiState.isLiveTab,
+                                    onRetry = onRefresh,
+                                    onBrowseAll = { onSelectTrendingTopic("anime") },
+                                )
+                            }
+                        }
+
+
+                        is FeedStatus.Success -> {
+                            itemsIndexed(
+                                items = gridEntries,
+                                key = { _, entry ->
+                                    when (entry) {
+                                        is WallpaperGridEntry.WallpaperItem -> entry.wallpaper.id
+                                        is WallpaperGridEntry.NativeAdSlot -> entry.slotKey
+                                    }
+                                },
+                                span = { _, entry ->
+                                    when (entry) {
+                                        is WallpaperGridEntry.NativeAdSlot -> StaggeredGridItemSpan.FullLine
+                                        is WallpaperGridEntry.WallpaperItem -> StaggeredGridItemSpan.SingleLane
+                                    }
+                                },
+                            ) { _, entry ->
+                                when (entry) {
+                                    is WallpaperGridEntry.NativeAdSlot -> {
+                                        NativeAdCard(
+                                            style = NativeAdStyle.GRID_CARD,
+                                            slotKey = entry.slotKey,
+                                            modifier = Modifier.fillMaxWidth(),
                                         )
-                                    } else {
-                                        Button(
-                                            onClick = onLoadMore,
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = ObsidianSurfaceElevated,
-                                                contentColor = InkWhite,
-                                            ),
-                                            shape = RoundedCornerShape(14.dp),
-                                        ) {
-                                            Text("Load More Wallpapers")
+                                    }
+
+
+                                    is WallpaperGridEntry.WallpaperItem -> {
+                                        val index = entry.originalIndex
+                                        val wallpaper = entry.wallpaper
+                                        val staggeredRatio = remember(wallpaper.id, index) {
+                                            when (index % 4) {
+                                                0 -> wallpaper.aspectRatio.coerceIn(0.55f, 0.64f)
+                                                1 -> wallpaper.aspectRatio.coerceIn(0.68f, 0.78f)
+                                                2 -> wallpaper.aspectRatio.coerceIn(0.58f, 0.70f)
+                                                else -> wallpaper.aspectRatio.coerceIn(0.62f, 0.74f)
+                                            }
+                                        }
+                                        val isFavorite by remember(wallpaper.id, favoriteIdsState) {
+                                            derivedStateOf { wallpaper.id in favoriteIdsState.value }
+                                        }
+                                        WallpaperStaggeredCard(
+                                            wallpaper = wallpaper,
+                                            staggeredRatio = staggeredRatio,
+                                            isFavorite = isFavorite,
+                                            onClick = { onOpenDetail(index) },
+                                            onToggleFavorite = { onToggleFavorite(wallpaper) },
+                                        )
+                                    }
+                                }
+                            }
+
+
+                            if (uiState.isLoadingMore || uiState.hasMore) {
+                                item(span = StaggeredGridItemSpan.FullLine) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        if (uiState.isLoadingMore) {
+                                            androidx.compose.material3.CircularProgressIndicator(
+                                                color = CrimsonBlade,
+                                                modifier = Modifier.size(28.dp),
+                                            )
+                                        } else {
+                                            Button(
+                                                onClick = onLoadMore,
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = ObsidianSurfaceElevated,
+                                                    contentColor = InkWhite,
+                                                ),
+                                                shape = RoundedCornerShape(14.dp),
+                                            ) {
+                                                Text("Load More Wallpapers")
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                    }
+                }
+
+
+                // Top-Center "Scroll to Top" Floating Action Button when deep in the feed (> 15 items)
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = showScrollToTop,
+                    enter = fadeIn() + slideInVertically { -it },
+                    exit = fadeOut() + slideOutVertically { -it },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 12.dp),
+                ) {
+                    FloatingActionButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                gridState.animateScrollToItem(0)
+                            }
+                        },
+                        shape = CircleShape,
+                        containerColor = ObsidianSurfaceElevated.copy(alpha = 0.94f),
+                        contentColor = CrimsonBlade,
+                        elevation = FloatingActionButtonDefaults.elevation(
+                            defaultElevation = 8.dp,
+                            pressedElevation = 12.dp,
+                        ),
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .border(1.dp, CrimsonBlade.copy(alpha = 0.55f), CircleShape)
+                            .testTag("scroll_to_top_fab"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowUpward,
+                            contentDescription = "Scroll to top",
+                            modifier = Modifier.size(22.dp),
+                        )
                     }
                 }
             }
         }
     }
 }
+
 
 @Composable
 private fun HomeSearchHeader(
@@ -417,6 +536,7 @@ private fun HomeSearchHeader(
             }
         }
 
+
         FilledTonalIconButton(
             onClick = onOpenFilter,
             colors = IconButtonDefaults.filledTonalIconButtonColors(
@@ -437,6 +557,7 @@ private fun HomeSearchHeader(
         }
     }
 }
+
 
 @Composable
 private fun StaticLiveTabs(
@@ -505,6 +626,7 @@ private fun StaticLiveTabs(
             }
         }
 
+
         val liveSelected = isLiveTab
         val liveTabShape = RoundedCornerShape(12.dp)
         Box(
@@ -559,6 +681,7 @@ private fun StaticLiveTabs(
     }
 }
 
+
 @Composable
 private fun TrendingCarouselBanner(
     banners: List<AppWallpaper>,
@@ -567,6 +690,7 @@ private fun TrendingCarouselBanner(
     val pageCount = if (banners.isNotEmpty()) banners.size else AnimeCatalog.trendingTopics.size
     val pagerState = rememberPagerState(pageCount = { pageCount })
     val lifecycleOwner = LocalLifecycleOwner.current
+
 
     LaunchedEffect(pagerState, pageCount, lifecycleOwner) {
         if (pageCount <= 1) return@LaunchedEffect
@@ -584,10 +708,12 @@ private fun TrendingCarouselBanner(
         }
     }
 
+
     val context = LocalContext.current
     val density = LocalDensity.current
     val bannerHeightPx = remember(density) { with(density) { 176.dp.roundToPx() } }
     val bannerWidthPx = remember(density) { with(density) { 420.dp.roundToPx() } }
+
 
     Column(modifier = Modifier.fillMaxWidth()) {
         HorizontalPager(
@@ -603,6 +729,7 @@ private fun TrendingCarouselBanner(
         ) { page ->
             val banner = banners.getOrNull(page)
             val topicTitle = AnimeCatalog.trendingTopics.getOrNull(page)?.title ?: "Trending Anime"
+
 
             Box(
                 modifier = Modifier
@@ -640,6 +767,7 @@ private fun TrendingCarouselBanner(
                     )
                 }
 
+
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -651,6 +779,7 @@ private fun TrendingCarouselBanner(
                             ),
                         ),
                 )
+
 
                 Column(
                     modifier = Modifier
@@ -681,7 +810,9 @@ private fun TrendingCarouselBanner(
                         }
                     }
 
+
                     Spacer(modifier = Modifier.height(10.dp))
+
 
                     Text(
                         text = banner?.animeSeries?.takeIf {
@@ -699,7 +830,9 @@ private fun TrendingCarouselBanner(
             }
         }
 
+
         Spacer(modifier = Modifier.height(10.dp))
+
 
         // Carousel dot indicators
         Row(
@@ -721,6 +854,7 @@ private fun TrendingCarouselBanner(
         }
     }
 }
+
 
 @Composable
 private fun TrendingTopicChips(
@@ -805,6 +939,7 @@ private fun TrendingTopicChips(
     }
 }
 
+
 @Composable
 private fun RateLimitBanner(message: String) {
     Surface(
@@ -832,6 +967,7 @@ private fun RateLimitBanner(message: String) {
         }
     }
 }
+
 
 @Composable
 private fun EmptyFeedCard(

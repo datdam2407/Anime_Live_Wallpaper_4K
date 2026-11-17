@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 
+
+
 import android.content.Context
 import android.os.Build
 import android.util.DisplayMetrics
@@ -68,9 +70,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -132,6 +136,8 @@ import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 
 
+
+
 @Composable
 fun DetailPreviewScreen(
     wallpapers: List<AppWallpaper>,
@@ -152,6 +158,8 @@ fun DetailPreviewScreen(
     val coroutineScope = rememberCoroutineScope()
 
 
+
+
     if (wallpapers.isEmpty()) {
         Box(
             modifier = Modifier
@@ -167,6 +175,8 @@ fun DetailPreviewScreen(
         }
         return
     }
+
+
 
 
     val pagerEntries = remember(wallpapers) {
@@ -186,6 +196,8 @@ fun DetailPreviewScreen(
     var showTargetDialog by remember { mutableStateOf(false) }
 
 
+
+
     BackHandler {
         when {
             appliedSuccessTarget != null -> onDismissAppliedSuccess()
@@ -194,6 +206,8 @@ fun DetailPreviewScreen(
             else -> onBack()
         }
     }
+
+
 
 
     val context = LocalContext.current
@@ -206,8 +220,12 @@ fun DetailPreviewScreen(
     }
 
 
+
+
     val currentPage by remember(pagerState) { derivedStateOf { pagerState.currentPage } }
     val settledPage by remember(pagerState) { derivedStateOf { pagerState.settledPage } }
+
+
 
 
     LaunchedEffect(settledPage, pagerEntries) {
@@ -218,6 +236,8 @@ fun DetailPreviewScreen(
         } else {
             isFullScreen = false
         }
+
+
 
 
         // Pre-warm neighbor pages
@@ -252,9 +272,13 @@ fun DetailPreviewScreen(
     }
 
 
+
+
     val currentEntry = pagerEntries.getOrNull(currentPage)
     val currentWallpaperPage = currentEntry as? DetailPagerEntry.WallpaperPage
     val currentWallpaper = currentWallpaperPage?.wallpaper
+
+
 
 
     // ĐIỀU KIỆN ẨN DIALOG MP4: Bắt buộc currentWallpaper.isLive phải bằng True!
@@ -269,9 +293,13 @@ fun DetailPreviewScreen(
     }
 
 
+
+
     fun triggerSetWallpaper(wallpaper: AppWallpaper) {
         // Vẫn chặn nếu đang processing ngầm để tránh người dùng nhấn 2-3 lần liên tiếp gây crash
         if (isProcessing) return
+
+
 
 
         if (wallpaper.isLive) {
@@ -280,6 +308,8 @@ fun DetailPreviewScreen(
             showTargetDialog = true // Mở dialog 3 options của mình
         }
     }
+
+
 
 
     Box(
@@ -356,6 +386,8 @@ fun DetailPreviewScreen(
                     }
 
 
+
+
                     val isCurrentLive = currentWallpaperPage?.wallpaper?.isLive == true
                     Surface(
                         color = if (isCurrentLive) {
@@ -371,7 +403,7 @@ fun DetailPreviewScreen(
                         },
                     ) {
                         val badgeLabel = if (currentWallpaperPage != null) {
-                            "${currentWallpaperPage.wallpaper.resolutionLabel} • ${currentWallpaperPage.wallpaperIndex + 1}/${wallpapers.size}"
+                            "${currentWallpaperPage.wallpaper.resolutionLabel} • currentWallpaperPage.wallpaperIndex+1/{wallpapers.size}"
                         } else {
                             "Sponsored • Ad"
                         }
@@ -401,6 +433,8 @@ fun DetailPreviewScreen(
                     }
 
 
+
+
                     if (currentWallpaper != null) {
                         IconButton(
                             onClick = { isFullScreen = true },
@@ -420,6 +454,8 @@ fun DetailPreviewScreen(
                         Spacer(modifier = Modifier.size(48.dp))
                     }
                 }
+
+
 
 
                 HorizontalPager(
@@ -445,6 +481,8 @@ fun DetailPreviewScreen(
                     }
 
 
+
+
                     val cardTransformModifier = Modifier
                         .fillMaxSize()
                         .padding(vertical = 6.dp)
@@ -459,6 +497,8 @@ fun DetailPreviewScreen(
                         }
 
 
+
+
                     when (entry) {
                         is DetailPagerEntry.WallpaperPage -> {
                             val item = entry.wallpaper
@@ -469,6 +509,7 @@ fun DetailPreviewScreen(
                                 item = item,
                                 isActive = isCurrentPage,
                                 isFavorite = itemIsFavorite,
+                                isProcessing = isProcessing,
                                 muted = muteLiveAudio,
                                 onCardClick = {
                                     if (isCurrentPage) {
@@ -482,10 +523,6 @@ fun DetailPreviewScreen(
                                 onSetWallpaperClick = {
                                     if (isCurrentPage) {
                                         triggerSetWallpaper(item)
-                                    } else {
-                                        coroutineScope.launch {
-                                            pagerState.animateScrollToPage(page)
-                                        }
                                     }
                                 },
                                 onToggleFavoriteClick = {
@@ -494,6 +531,8 @@ fun DetailPreviewScreen(
                                 modifier = cardTransformModifier,
                             )
                         }
+
+
 
 
                         is DetailPagerEntry.NativeAdPage -> {
@@ -505,6 +544,8 @@ fun DetailPreviewScreen(
                         }
                     }
                 }
+
+
 
 
                 if (currentWallpaper != null) {
@@ -552,6 +593,8 @@ fun DetailPreviewScreen(
         }
 
 
+
+
         AnimatedVisibility(
             visible = isProcessing,
             enter = fadeIn(),
@@ -562,6 +605,8 @@ fun DetailPreviewScreen(
                 progress = liveDownloadProgress,
             )
         }
+
+
 
 
         AnimatedVisibility(
@@ -576,6 +621,8 @@ fun DetailPreviewScreen(
         }
     }
 }
+
+
 
 
 @Composable
@@ -630,7 +677,11 @@ private fun WallpaperAppliedSuccessPopup(
                 )
 
 
+
+
                 Spacer(modifier = Modifier.height(14.dp))
+
+
 
 
                 Text(
@@ -638,6 +689,8 @@ private fun WallpaperAppliedSuccessPopup(
                     style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
                     color = InkWhite.copy(alpha = 0.95f),
                 )
+
+
 
 
                 if (targetLabel.isNotBlank()) {
@@ -650,7 +703,11 @@ private fun WallpaperAppliedSuccessPopup(
                 }
 
 
+
+
                 Spacer(modifier = Modifier.height(24.dp))
+
+
 
 
                 Button(
@@ -674,6 +731,8 @@ private fun WallpaperAppliedSuccessPopup(
         }
     }
 }
+
+
 
 
 @Composable
@@ -740,6 +799,7 @@ private fun WallpaperProcessingOverlay(
                     }
                 }
 
+
                 if (progress != null) {
                     LinearProgressIndicator(
                         progress = { progress.coerceIn(0, 100) / 100f },
@@ -763,6 +823,7 @@ private fun WallpaperProcessingOverlay(
                     )
                 }
 
+
                 Text(
                     text = label,
                     style = MaterialTheme.typography.bodySmall,
@@ -774,11 +835,14 @@ private fun WallpaperProcessingOverlay(
 }
 
 
+
+
 @Composable
 private fun CarouselWallpaperCard(
     item: AppWallpaper,
     isActive: Boolean,
     isFavorite: Boolean,
+    isProcessing: Boolean,
     muted: Boolean,
     onCardClick: () -> Unit,
     onSetWallpaperClick: () -> Unit,
@@ -786,6 +850,10 @@ private fun CarouselWallpaperCard(
     modifier: Modifier = Modifier,
 ) {
     val cardShape = RoundedCornerShape(24.dp)
+    var isMediaReady by remember(item.id, item.imageUrl, item.videoUrl, item.isLive) {
+        mutableStateOf(false)
+    }
+    val isApplyEnabled = isActive && isMediaReady && !isProcessing
 
 
     Surface(
@@ -805,6 +873,7 @@ private fun CarouselWallpaperCard(
                 item = item,
                 isActive = isActive,
                 muted = muted,
+                onMediaReadyChanged = { ready -> isMediaReady = ready },
                 modifier = Modifier.fillMaxSize(),
             )
 
@@ -847,38 +916,52 @@ private fun CarouselWallpaperCard(
             }
 
 
-            Surface(
-                color = if (item.isLive) {
-                    Color(0xE63D196E)
-                } else {
-                    Color(0xCC2A2836)
-                },
+            Button(
+                onClick = onSetWallpaperClick,
+                enabled = isApplyEnabled,
                 shape = RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp),
-                border = if (item.isLive) BorderStroke(1.dp, PremiumGoldBorderBrush) else null,
+                border = when {
+                    !isApplyEnabled -> BorderStroke(1.dp, HairlineBorder.copy(alpha = 0.45f))
+                    item.isLive -> BorderStroke(1.dp, PremiumGoldBorderBrush)
+                    else -> null
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (item.isLive) Color(0xE63D196E) else Color(0xCC2A2836),
+                    contentColor = InkWhite,
+                    disabledContainerColor = Color(0xD91E1E26),
+                    disabledContentColor = InkMuted.copy(alpha = 0.52f),
+                ),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .height(54.dp)
-                    .clickable(onClick = onSetWallpaperClick)
                     .testTag(if (isActive) "set_wallpaper_button" else "set_wallpaper_side_${item.id}"),
             ) {
                 Row(
-                    modifier = Modifier.fillMaxSize(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
                 ) {
-                    if (item.isLive) {
+                    if (!isMediaReady && isActive) {
+                        CircularProgressIndicator(
+                            color = InkMuted.copy(alpha = 0.65f),
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    } else if (item.isLive) {
                         Image(
                             painter = painterResource(id = R.drawable.ic_premium_crown),
                             contentDescription = null,
                             contentScale = ContentScale.Fit,
-                            modifier = Modifier.size(width = 21.dp, height = 15.dp),
+                            modifier = Modifier
+                                .size(width = 21.dp, height = 15.dp)
+                                .alpha(if (isApplyEnabled) 1f else 0.38f),
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Rounded.Wallpaper,
                             contentDescription = null,
-                            tint = InkWhite,
+                            tint = if (isApplyEnabled) InkWhite else InkMuted.copy(alpha = 0.52f),
                             modifier = Modifier.size(18.dp),
                         )
                     }
@@ -886,7 +969,7 @@ private fun CarouselWallpaperCard(
                     Text(
                         text = if (item.isLive) "Apply Live Wallpaper" else "Apply Wallpaper",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                        color = InkWhite,
+                        color = if (isApplyEnabled) InkWhite else InkMuted.copy(alpha = 0.52f),
                     )
                 }
             }
@@ -895,11 +978,14 @@ private fun CarouselWallpaperCard(
 }
 
 
+
+
 @Composable
 private fun WallpaperMediaContent(
     item: AppWallpaper,
     isActive: Boolean,
     muted: Boolean,
+    onMediaReadyChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -910,10 +996,20 @@ private fun WallpaperMediaContent(
             thumbnailUrl = item.thumbnailUrl,
             isActive = isActive,
             muted = muted,
+            onVideoReadyChanged = onMediaReadyChanged,
             modifier = modifier,
         )
     } else {
         var isHighResLoading by remember(item.id, item.imageUrl) { mutableStateOf(true) }
+        val latestOnMediaReadyChanged by rememberUpdatedState(onMediaReadyChanged)
+
+
+        LaunchedEffect(item.id, item.imageUrl) {
+            isHighResLoading = true
+            latestOnMediaReadyChanged(false)
+        }
+
+
         BoxWithConstraints(modifier = modifier) {
             val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(480, 1440) }
             val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(640, 2560) }
@@ -954,8 +1050,18 @@ private fun WallpaperMediaContent(
                 placeholder = thumbPainter,
                 error = thumbPainter,
                 contentScale = ContentScale.Crop,
-                onSuccess = { isHighResLoading = false },
-                onError = { isHighResLoading = false },
+                onLoading = {
+                    isHighResLoading = true
+                    latestOnMediaReadyChanged(false)
+                },
+                onSuccess = {
+                    isHighResLoading = false
+                    latestOnMediaReadyChanged(true)
+                },
+                onError = {
+                    isHighResLoading = false
+                    latestOnMediaReadyChanged(false)
+                },
                 modifier = Modifier.fillMaxSize(),
             )
             if (isHighResLoading && isActive) {
@@ -972,6 +1078,8 @@ private fun WallpaperMediaContent(
 }
 
 
+
+
 @OptIn(UnstableApi::class)
 @Composable
 private fun LiveMp4FullScreenPlayer(
@@ -979,14 +1087,17 @@ private fun LiveMp4FullScreenPlayer(
     thumbnailUrl: String,
     isActive: Boolean,
     muted: Boolean,
+    onVideoReadyChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val latestOnVideoReadyChanged by rememberUpdatedState(onVideoReadyChanged)
     var isHostStarted by remember {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
     }
+    var isVideoReady by remember(videoUrl) { mutableStateOf(false) }
 
 
     DisposableEffect(lifecycleOwner) {
@@ -1005,6 +1116,14 @@ private fun LiveMp4FullScreenPlayer(
 
 
     val shouldPlay = isActive && isHostStarted
+
+
+    LaunchedEffect(shouldPlay, videoUrl) {
+        if (!shouldPlay) {
+            isVideoReady = false
+            latestOnVideoReadyChanged(false)
+        }
+    }
 
 
     BoxWithConstraints(modifier = modifier) {
@@ -1035,11 +1154,26 @@ private fun LiveMp4FullScreenPlayer(
             ActiveExoPlayerOverlay(
                 videoUrl = videoUrl,
                 muted = muted,
+                onReadyChanged = { ready ->
+                    isVideoReady = ready
+                    latestOnVideoReadyChanged(ready)
+                },
                 modifier = Modifier.fillMaxSize(),
             )
+            if (!isVideoReady) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        color = CrimsonBlade,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(34.dp),
+                    )
+                }
+            }
         }
     }
 }
+
+
 
 
 @OptIn(UnstableApi::class)
@@ -1047,9 +1181,11 @@ private fun LiveMp4FullScreenPlayer(
 private fun ActiveExoPlayerOverlay(
     videoUrl: String,
     muted: Boolean,
+    onReadyChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val latestOnReadyChanged by rememberUpdatedState(onReadyChanged)
     // Enable Media3 GPU DelogoEffect on physical devices; fall back to direct hardware
     // MediaCodec TextureView output on emulators (EGL_emulation) or after a GL error.
     var useEffects by remember(videoUrl) { mutableStateOf(DelogoEffect.isSupportedOnDevice()) }
@@ -1126,7 +1262,34 @@ private fun ActiveExoPlayerOverlay(
 
 
     DisposableEffect(player) {
+        val readinessListener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                latestOnReadyChanged(
+                    playbackState == Player.STATE_READY && player.playerError == null,
+                )
+            }
+
+
+            override fun onRenderedFirstFrame() {
+                if (player.playbackState == Player.STATE_READY && player.playerError == null) {
+                    latestOnReadyChanged(true)
+                }
+            }
+
+
+            override fun onPlayerError(error: PlaybackException) {
+                latestOnReadyChanged(false)
+            }
+        }
+        latestOnReadyChanged(
+            player.playbackState == Player.STATE_READY && player.playerError == null,
+        )
+        player.addListener(readinessListener)
+
+
         onDispose {
+            latestOnReadyChanged(false)
+            player.removeListener(readinessListener)
             playerViewRef?.let { view ->
                 if (view.player === player) {
                     view.player = null
@@ -1166,6 +1329,8 @@ private fun ActiveExoPlayerOverlay(
         modifier = modifier,
     )
 }
+
+
 
 
 @Composable
@@ -1215,6 +1380,8 @@ private fun WallpaperTargetDialog(
 }
 
 
+
+
 @Composable
 private fun TargetOptionRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -1247,6 +1414,3 @@ private fun TargetOptionRow(
         }
     }
 }
-
-
-

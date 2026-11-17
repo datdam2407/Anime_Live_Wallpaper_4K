@@ -1,29 +1,60 @@
 package com.example.data.remote
 
+
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+
+data class RateLimitDistractionPrompt(
+    val id: Long,
+    val requestCount: Int,
+    val headline: String,
+    val funFact: String,
+    val breatherSeconds: Int = WallhavenRateLimiter.DEFAULT_BREATHER_SECONDS,
+)
+
+
 /**
- * Sliding-window rate limiter + cooldown gatekeeper for the Wallhaven API.
- * Wallhaven enforces a strict 45 requests/minute policy; we cap outgoing traffic
- * at 38 requests per 60-second window with minimum inter-request pacing and
- * automatic 429 cooldown backoff so callers degrade gracefully to Room cache
- * or Reddit instead of exhausting quota.
+ * Sliding-window rate limiter + 40th-request distraction gatekeeper for the Wallhaven API.
+ * Wallhaven enforces a strict 45 requests/minute policy:
+ * - At the 40th request within a 60-second window, emits a [RateLimitDistractionPrompt]
+ *   so the UI can display a fun anime trivia breather dialog and naturally stall the user.
+ * - Caps outgoing traffic at 43 requests per 60-second window with minimum inter-request pacing
+ *   and automatic 429 cooldown backoff.
  */
 class WallhavenRateLimiter(
     private val maxRequestsPerWindow: Int = DEFAULT_MAX_REQUESTS_PER_MINUTE,
+    private val distractionThreshold: Int = DISTRACTION_REQUEST_THRESHOLD,
     private val windowMillis: Long = DEFAULT_WINDOW_MILLIS,
     private val minSpacingMillis: Long = DEFAULT_MIN_SPACING_MILLIS,
     private val defaultCooldownMillis: Long = DEFAULT_COOLDOWN_MILLIS,
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
     companion object {
-        const val DEFAULT_MAX_REQUESTS_PER_MINUTE = 38
+        const val DISTRACTION_REQUEST_THRESHOLD = 40
+        const val DEFAULT_MAX_REQUESTS_PER_MINUTE = 43
         const val DEFAULT_WINDOW_MILLIS = 60_000L
         const val DEFAULT_MIN_SPACING_MILLIS = 450L
         const val DEFAULT_COOLDOWN_MILLIS = 45_000L
+        const val DEFAULT_BREATHER_SECONDS = 4
+
+
+        private val ANIME_BREATHER_FACTS: List<Pair<String, String>> = listOf(
+            "Did you know?" to
+                    "In Jujutsu Kaisen, Gojo's Six Eyes frames were animated at ultra-high keyframe density—giving our 4K servers a quick breather keeps your feed silky smooth!",
+            "Taking a quick breather…" to
+                    "Makoto Shinkai's background artists paint cloud layers at 4K+ resolution before compositing light rays. Pausing a few seconds keeps Wallhaven's 45 req/min gate happy!",
+            "Did you know?" to
+                    "Frieren: Beyond Journey's End recorded real acoustic folk instruments in reverberant halls for its soundtrack. Your next batch of 4K artworks is lining up!",
+            "Katana cooldown…" to
+                    "Ufotable blends hand-drawn 2D sword arcs with custom 3D camera shaders in Demon Slayer. Catching our breath for a moment prevents server rate-limiting!",
+        )
     }
+
 
     sealed interface AcquireResult {
         data object Allowed : AcquireResult
@@ -33,10 +64,23 @@ class WallhavenRateLimiter(
         ) : AcquireResult
     }
 
+
     private val mutex = Mutex()
     private val requestTimestamps = ArrayDeque<Long>()
     private var lastRequestAtMs: Long = 0L
     private var cooldownUntilMs: Long = 0L
+    private var distractionShownInCurrentWindow: Boolean = false
+    private var distractionSequence: Int = 0
+
+
+    private val _distractionPrompt = MutableStateFlow<RateLimitDistractionPrompt?>(null)
+    val distractionPrompt: StateFlow<RateLimitDistractionPrompt?> = _distractionPrompt.asStateFlow()
+
+
+    fun dismissDistractionPrompt() {
+        _distractionPrompt.value = null
+    }
+
 
     suspend fun tryAcquire(): AcquireResult {
         while (true) {
@@ -45,12 +89,14 @@ class WallhavenRateLimiter(
                 val now = clock()
                 pruneExpiredLocked(now)
 
+
                 if (now < cooldownUntilMs) {
                     return AcquireResult.RateLimited(
                         retryAfterMs = (cooldownUntilMs - now).coerceAtLeast(1_000L),
                         fromServer429 = true,
                     )
                 }
+
 
                 if (requestTimestamps.size >= maxRequestsPerWindow) {
                     val oldest = requestTimestamps.first()
@@ -61,12 +107,30 @@ class WallhavenRateLimiter(
                     )
                 }
 
+
                 val elapsedSinceLast = now - lastRequestAtMs
                 if (lastRequestAtMs > 0L && elapsedSinceLast in 0 until minSpacingMillis) {
                     spacingDelayMs = minSpacingMillis - elapsedSinceLast
                 } else {
                     requestTimestamps.addLast(now)
                     lastRequestAtMs = now
+                    val activeCount = requestTimestamps.size
+                    if (distractionThreshold > 0 &&
+                        activeCount >= distractionThreshold &&
+                        !distractionShownInCurrentWindow
+                    ) {
+                        distractionShownInCurrentWindow = true
+                        val factIndex = distractionSequence % ANIME_BREATHER_FACTS.size
+                        distractionSequence++
+                        val (headline, funFact) = ANIME_BREATHER_FACTS[factIndex]
+                        _distractionPrompt.value = RateLimitDistractionPrompt(
+                            id = now + distractionSequence,
+                            requestCount = activeCount,
+                            headline = headline,
+                            funFact = funFact,
+                            breatherSeconds = DEFAULT_BREATHER_SECONDS,
+                        )
+                    }
                     return AcquireResult.Allowed
                 }
             }
@@ -75,6 +139,7 @@ class WallhavenRateLimiter(
             }
         }
     }
+
 
     suspend fun recordServerRateLimit(retryAfterSeconds: Long? = null) {
         mutex.withLock {
@@ -87,6 +152,7 @@ class WallhavenRateLimiter(
         }
     }
 
+
     suspend fun remainingQuota(): Int = mutex.withLock {
         val now = clock()
         pruneExpiredLocked(now)
@@ -97,10 +163,21 @@ class WallhavenRateLimiter(
         }
     }
 
+
+    suspend fun activeRequestsInWindow(): Int = mutex.withLock {
+        val now = clock()
+        pruneExpiredLocked(now)
+        requestTimestamps.size
+    }
+
+
     private fun pruneExpiredLocked(now: Long) {
         val cutoff = now - windowMillis
         while (requestTimestamps.isNotEmpty() && requestTimestamps.first() <= cutoff) {
             requestTimestamps.removeFirst()
+        }
+        if (distractionThreshold > 0 && requestTimestamps.size < distractionThreshold) {
+            distractionShownInCurrentWindow = false
         }
     }
 }

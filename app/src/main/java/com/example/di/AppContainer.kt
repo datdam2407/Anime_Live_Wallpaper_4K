@@ -7,10 +7,12 @@ import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.example.ads.InterstitialAdManager
+import com.example.ads.NativeAdManager
 import com.example.data.local.KuroWallDatabase
 import com.example.data.local.LiveWallpaperDataSource
 import com.example.data.local.SettingsDataStore
 import com.example.data.remote.NetworkModule
+import com.example.data.remote.WallhavenRateLimiter
 import com.example.data.repository.WallpaperRepository
 import com.example.util.BitmapCropper
 import com.example.util.MediaDownloadManager
@@ -61,12 +63,18 @@ class AppContainer(context: Context) {
     }
 
 
+    val wallhavenRateLimiter: WallhavenRateLimiter by lazy {
+        WallhavenRateLimiter()
+    }
+
+
     val wallpaperRepository: WallpaperRepository by lazy {
         WallpaperRepository(
             wallhavenApi = NetworkModule.wallhavenService,
             redditApi = NetworkModule.redditService,
             wallpaperDao = database.wallpaperDao(),
             liveWallpaperDataSource = liveWallpaperDataSource,
+            wallhavenRateLimiter = wallhavenRateLimiter,
         )
     }
 
@@ -92,11 +100,7 @@ class AppContainer(context: Context) {
     }
 
 
-    val nativeAdManager: com.example.ads.NativeAdManager by lazy {
-        com.example.ads.NativeAdManager(appContext = appContext)
+    val nativeAdManager: NativeAdManager by lazy {
+        NativeAdManager(appContext = appContext)
     }
 }
-
-
-
-
