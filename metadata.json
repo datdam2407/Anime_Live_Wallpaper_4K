@@ -1,0 +1,6 @@
+{
+  "name": "Kuro: Anime Live Wallpaper 4K",
+  "description": "HD, 2K, and 4K Anime Static and Live Wallpaper App powered by Wallhaven, Reddit, Room caching, Coil bitmap cropping, and Media3 ExoPlayer WallpaperService.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

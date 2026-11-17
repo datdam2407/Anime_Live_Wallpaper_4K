@@ -1,0 +1,348 @@
+[
+  {
+    "ID": "One_piece_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712026/MOBILE-Luffy-with-Jolly-Roger-Flag_dpgkfw.mp4",
+    "Category": "Onepiece",
+    "Description": "Luffy"
+  },
+  {
+    "ID": "One_piece_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712026/MOBILE-Zoro-Green-Spirit-Dragon_mg71qn.mp4",
+    "Category": "Onepiece",
+    "Description": "Zoro Green Spirit Dragon"
+  },
+  {
+    "ID": "One_piece_3",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712576/MOBILE-Roronoa-Zoro-Cherry-Blossom-Red-Sun_qfettx.mp4",
+    "Category": "Onepiece",
+    "Description": "Roronoa Zoro Cherry Blossom Red Sun"
+  },
+  {
+    "ID": "Dragonball_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712025/MOBILE-Battle-Damaged-Super-Saiyan-Goku_xxhvqh.mp4",
+    "Category": "Dragonball",
+    "Description": "Battle Damaged Super Saiyan Goku"
+  },
+  {
+    "ID": "Dragonball_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712575/MOBILE-Dragon-Ball-Z-SSJ2-Gohan_vjl9mh.mp4",
+    "Category": "Dragonball",
+    "Description": "Dragon Ball Z SSJ2 Gohan"
+  },
+  {
+    "ID": "Naruto_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712026/MOBILE-Naruto-Uzumaki-vs-Sasuke-Uchiha_wuflvl.mp4",
+    "Category": "Naruto",
+    "Description": "Naruto Uzumaki vs Sasuke Uchiha"
+  },
+  {
+    "ID": "Naruto_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712360/MOBILE-Madara-Uchiha-Blood-Moon_gju9e5.mp4",
+    "Category": "Naruto",
+    "Description": "Madara Uchiha Blood Moon"
+  },
+  {
+    "ID": "Naruto_3",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712575/MOBILE-Kakashi-Glowing-Sharingan-and-Blood-Moon_kueieq.mp4",
+    "Category": "Naruto",
+    "Description": "Kakashi Glowing Sharingan and Blood Moon"
+  },
+  {
+    "ID": "Demon-Slayer_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712025/MOBILE-Mitsuri-and-Obanai-Demon-Slayer_nowkxf.mp4",
+    "Category": "Demon-Slayer",
+    "Description": "Mitsuri and Obanai Demon Slayer"
+  },
+  {
+    "ID": "Demon-Slayer_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712736/MOBILE-Demon-Slayer-Hashira-Circle-Moonlit-Sky_lyjfew.mp4",
+    "Category": "Demon-Slayer",
+    "Description": "Demon Slayer Hashira Circle Moonlit Sky"
+  },
+  {
+    "ID": "Death_Note_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712360/MOBILE-Gothic-L-Lawliet-and-Ryuk_rhkvnj.mp4",
+    "Category": "Death Note",
+    "Description": "Gothic L Lawliet and Ryuk"
+  },
+  {
+    "ID": "Death_Note_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712575/MOBILE-Light-Yagami-and-Ryuk-Shinigami-Full-Moon_nw0otg.mp4",
+    "Category": "Death Note",
+    "Description": "Light Yagami and Ryuk Shinigami Full Moon"
+  },
+  {
+    "ID": "Witch_Hat_Atelier_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712736/MOBILE-Coco-Witch-Hat-Atelier_jwywxj.mp4",
+    "Category": "Witch Hat Atelier",
+    "Description": "Coco"
+  },
+  {
+    "ID": "zero_kara_Hajimeru_Isekai_Seikatsu_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712736/MOBILE-Emilia-ReZero-Galaxy-Balcony_blscol.mp4",
+    "Category": "zero kara Hajimeru Isekai Seikatsu",
+    "Description": "Emilia"
+  },
+  {
+    "ID": "Toro_toro_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794712736/MOBILE-My-Neighbor-Totoro-Sleeping_ewf4hu.mp4",
+    "Category": "Toro toro",
+    "Description": "My Neighbor Totoro Sleeping"
+  },
+  {
+    "ID": "Frieren_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806137/MOBILE-Beyond-Journeys-End-Frieren_bqg7le.mp4",
+    "Category": "Frieren: Beyond Journey's End",
+    "Description": "Beyond Journeys End Frieren"
+  },
+  {
+    "ID": "Frieren_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806134/MOBILE-Frieren-Elf_vdyrik.mp4",
+    "Category": "Frieren: Beyond Journey's End",
+    "Description": "Frieren Elf"
+  },
+  {
+    "ID": "Frieren_3",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806130/MOBILE-Frieren-and-Himmel_na6r5y.mp4",
+    "Category": "Frieren: Beyond Journey's End",
+    "Description": "Frieren and Himmel"
+  },
+  {
+    "ID": "Frieren_4",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806130/MOBILE-Frieren-the-Undertaker_uouobo.mp4",
+    "Category": "Frieren: Beyond Journey's End",
+    "Description": "Frieren the Undertaker"
+  },
+  {
+    "ID": "Frieren_5",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806126/MOBILE-Frieren_the_Slayer_fxrpxn.mp4",
+    "Category": "Frieren: Beyond Journey's End",
+    "Description": "Frieren the Slayer"
+  },
+  {
+    "ID": "Frieren_6",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806126/MOBILE-Frieren-Crimson_Bloom_yquvuu.mp4",
+    "Category": "Frieren: Beyond Journey's End",
+    "Description": "Frieren Crimson Bloom"
+  },
+  {
+    "ID": "Frieren_7",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806126/MOBILE-Frieren-Ripples_eoz4as.mp4",
+    "Category": "Frieren: Beyond Journey's End",
+    "Description": "Frieren Ripples"
+  },
+  {
+    "ID": "Jujutsu_Kaisen_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806524/MOBILE-Yuta-Okkotsu-Jujutsu-Kaisen_nhruvw.mp4",
+    "Category": "Jujutsu Kaisen",
+    "Description": "Yuta Okkotsu Jujutsu Kaisen"
+  },
+  {
+    "ID": "Jujutsu_Kaisen_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806525/MOBILE-Jujutsu-Kaisen_d6p8ff.mp4",
+    "Category": "Jujutsu Kaisen",
+    "Description": "Jujutsu Kaisen"
+  },
+  {
+    "ID": "Jujutsu_Kaisen_3",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806522/MOBILE-Reverse-Cursed-Technique_xcftjo.mp4",
+    "Category": "Jujutsu Kaisen",
+    "Description": "Reverse Cursed Technique"
+  },
+  {
+    "ID": "Jujutsu_Kaisen_4",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806521/MOBILE-Hollow-Purple_fullc5.mp4",
+    "Category": "Jujutsu Kaisen",
+    "Description": "Hollow Purple"
+  },
+  {
+    "ID": "Jujutsu_Kaisen_5",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806527/MOBILE-Yuta-and-Rika-Jujutsu-Kaisen_ia0tfc.mp4",
+    "Category": "Jujutsu Kaisen",
+    "Description": "Yuta and Rika Jujutsu Kaisen"
+  },
+  {
+    "ID": "Jujutsu_Kaisen_6",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806528/MOBILE-Domain-Clash-Jujutsu-Kaisen_zjbew7.mp4",
+    "Category": "Jujutsu Kaisen",
+    "Description": "Domain Clash Jujutsu Kaisen"
+  },
+  {
+    "ID": "Jujutsu_Kaisen_7",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806532/MOBILE-Gojo_vs_Sukuna-Jujutsu_Kaisen_Epic_Battle_grui0f.mp4",
+    "Category": "Jujutsu Kaisen",
+    "Description": "Gojo vs Sukuna Jujutsu Kaisen Epic Battle"
+  },
+  {
+    "ID": "Jujutsu_Kaisen_8",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806544/MOBILE-Jujutsu_Kaisen_Purple-Lightning_gp5dq0.mp4",
+    "Category": "Jujutsu Kaisen",
+    "Description": "Jujutsu Kaisen Purple Lightning"
+  },
+  {
+    "ID": "JoJos_Bizarre_Adventure_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806749/MOBILE-Jojos-Bizarre-Adventure_ovzpde.mp4",
+    "Category": "JoJo's Bizarre Adventure",
+    "Description": "Jojos Bizarre Adventure"
+  },
+  {
+    "ID": "JoJos_Bizarre_Adventure_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806732/MOBILE-Jojos-Bizarre-Adventure_1_n48iyf.mp4",
+    "Category": "JoJo's Bizarre Adventure",
+    "Description": "Jojos Bizarre Adventure 1"
+  },
+  {
+    "ID": "JoJos_Bizarre_Adventure_3",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806727/MOBILE-Rohan-Kishibe_vlz1xy.mp4",
+    "Category": "JoJo's Bizarre Adventure",
+    "Description": "Rohan Kishibe"
+  },
+  {
+    "ID": "JoJos_Bizarre_Adventure_4",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806725/MOBILE-Gyro-Zeppeli_ensvwn.mp4",
+    "Category": "JoJo's Bizarre Adventure",
+    "Description": "Gyro Zeppeli"
+  },
+  {
+    "ID": "JoJos_Bizarre_Adventure_5",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794806721/MOBILE-Enrico-Pucci_mtbz5t.mp4",
+    "Category": "JoJo's Bizarre Adventure",
+    "Description": "Enrico Pucci"
+  },
+  {
+    "ID": "Oshi_no_Ko_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824233/MOBILE-Hoshino-Oshi-No-Ko_ycmaxo.mp4",
+    "Category": "Oshi no Ko",
+    "Description": "Hoshino Oshi No Ko"
+  },
+  {
+    "ID": "Oshi_no_Ko_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824231/MOBILE-Ai-Hoshino-Oshi-No-Ko_zpsixw.mp4",
+    "Category": "Oshi no Ko",
+    "Description": "Ai Hoshino Oshi No Ko"
+  },
+  {
+    "ID": "Oshi_no_Ko_3",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824231/MOBILE-Ai-Hoshino_hihauw.mp4",
+    "Category": "Oshi no Ko",
+    "Description": "Ai Hoshino"
+  },
+  {
+    "ID": "Oshi_no_Ko_4",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824229/MOBILE-Cute-Ai-Hoshino_pijheh.mp4",
+    "Category": "Oshi no Ko",
+    "Description": "Cute Ai Hoshino"
+  },
+  {
+    "ID": "Bleach_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824455/MOBILE-Shikai-Zangetsu-Bleach_vf67m5.mp4",
+    "Category": "Bleach: Thousand-Year Blood War",
+    "Description": "Shikai Zangetsu Bleach"
+  },
+  {
+    "ID": "Bleach_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824457/MOBILE-Ichigo_Kurosaki_Bleach_Anime_eenxy4.mp4",
+    "Category": "Bleach: Thousand-Year Blood War",
+    "Description": "Ichigo Kurosaki Bleach Anime"
+  },
+  {
+    "ID": "Bleach_3",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824459/MOBILE-Ulquiorra-Cifer-Bleach_npdnrl.mp4",
+    "Category": "Bleach: Thousand-Year Blood War",
+    "Description": "Ulquiorra Cifer Bleach"
+  },
+  {
+    "ID": "Bleach_4",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824461/MOBILE-Bleach-Ulquiorra-Cifer_ehcc0o.mp4",
+    "Category": "Bleach: Thousand-Year Blood War",
+    "Description": "Bleach Ulquiorra Cifer"
+  },
+  {
+    "ID": "Bleach_5",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824463/MOBILE-Ulquiorra-Cifer-Bleach-Demon_aslw30.mp4",
+    "Category": "Bleach: Thousand-Year Blood War",
+    "Description": "Ulquiorra Cifer Bleach Demon"
+  },
+  {
+    "ID": "Bleach_6",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824466/MOBILE-Bleach-Thousand-Year-Blood-War_tfhfma.mp4",
+    "Category": "Bleach: Thousand-Year Blood War",
+    "Description": "Bleach Thousand Year Blood War"
+  },
+  {
+    "ID": "Bleach_7",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824468/MOBILE-Rukia-Kuchiki-Bleach_zkmy6x.mp4",
+    "Category": "Bleach: Thousand-Year Blood War",
+    "Description": "Rukia Kuchiki Bleach"
+  },
+  {
+    "ID": "Solo_Leveling_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824914/MOBILE-Sung-Jinwoo-Demon-Solo-Leveling_hl6nd4.mp4",
+    "Category": "Solo leveling",
+    "Description": "Sung Jinwoo Demon Solo Leveling"
+  },
+  {
+    "ID": "Solo_Leveling_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824916/MOBILE-Solo-Leveling-Jinwoo-Purple-Portal_higsfp.mp4",
+    "Category": "Solo leveling",
+    "Description": "Solo Leveling Jinwoo Purple Portal"
+  },
+  {
+    "ID": "Solo_Leveling_3",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824916/MOBILE-Sung-Jinwoo-Solo-Leveling-Shadow-Monarch_fdogdn.mp4",
+    "Category": "Solo leveling",
+    "Description": "Sung Jinwoo Solo Leveling Shadow Monarch"
+  },
+  {
+    "ID": "Solo_Leveling_4",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824918/MOBILE-Sung_Jinwoo_4K_Live_Wallpaper-Solo_Leveling_Animated_jznn11.mp4",
+    "Category": "Solo leveling",
+    "Description": "Sung Jinwoo 4K Live Wallpaper Solo Leveling Animated"
+  },
+  {
+    "ID": "Solo_Leveling_5",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824921/MOBILE-Electrifying-Jin-Woo_af1hfc.mp4",
+    "Category": "Solo leveling",
+    "Description": "Electrifying Jin Woo"
+  },
+  {
+    "ID": "Solo_Leveling_6",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824923/MOBILE-Sung-Jin-Woo-Arise_sg8mgv.mp4",
+    "Category": "Solo leveling",
+    "Description": "Sung Jin Woo Arise"
+  },
+  {
+    "ID": "Solo_Leveling_7",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824925/MOBILE-Sung-Jinwoo-Daggers_jsrfon.mp4",
+    "Category": "Solo leveling",
+    "Description": "Sung Jinwoo Daggers"
+  },
+  {
+    "ID": "Solo_Leveling_8",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824927/MOBILE-Sung-Jinwoo-Black-Aura_jc4ftj.mp4",
+    "Category": "Solo leveling",
+    "Description": "Sung Jinwoo Black Aura"
+  },
+  {
+    "ID": "Solo_Leveling_9",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794824929/MOBILE-Cards-Gojo-Satoru_nk6yq6.mp4",
+    "Category": "Solo leveling",
+    "Description": "Cards Gojo Satoru"
+  },
+  {
+    "ID": "The_Apothecary_Diaries_1",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794825101/MOBILE-Maomao-The-Apothecary-Diaries_1_j6ycd7.mp4",
+    "Category": "The Apothecary Diaries",
+    "Description": "Maomao The Apothecary Diaries 1"
+  },
+  {
+    "ID": "The_Apothecary_Diaries_2",
+    "Image_live_url": "https://res.cloudinary.com/fpt-claudary/video/upload/v1794825103/MOBILE-Maomao-The-Apothecary-Diaries_foufi2.mp4",
+    "Category": "The Apothecary Diaries",
+    "Description": "Maomao The Apothecary Diaries"
+  }
+]
+
+
+
+

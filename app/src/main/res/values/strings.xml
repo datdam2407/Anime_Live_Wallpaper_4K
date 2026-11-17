@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Kuro: Anime Live Wallpaper 4K</string>
+    <string name="live_wallpaper_description">Kuro: Anime Live Wallpaper 4K Engine</string>
+    <string name="splash_headline">LIVE WALLPAPERS HD 4K</string>
+    <string name="splash_loading">Loading...</string>
+    <string name="nav_home">Discover</string>
+    <string name="nav_categories">Anime 200+</string>
+    <string name="nav_favorites">Saved</string>
+    <string name="nav_settings">Settings</string>
+    <string name="tab_static">4K Artworks</string>
+    <string name="tab_live">Live Wallpapers</string>
+    <string name="search_hint">Search anime, character, mood…</string>
+    <string name="apply_wallpaper">Apply Wallpaper</string>
+    <string name="apply_live_wallpaper">Apply Live Wallpaper</string>
+    <string name="ad_badge_label">Ad</string>
+    <string name="ad_sponsored_label">Sponsored</string>
+    <string name="ad_cta_fallback">Learn More</string>
+    <string name="live_wallpaper_keep_installed_note">Note: Live wallpapers require the app to remain installed to function.</string>
+</resources>
