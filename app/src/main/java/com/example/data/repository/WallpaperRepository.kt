@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import android.util.Log
 import com.example.data.local.LiveWallpaperDataSource
 import com.example.data.local.dao.WallpaperDao
 import com.example.data.local.entity.CachedWallpaperEntity
@@ -13,17 +14,24 @@ import com.example.domain.model.AnimeCatalog
 import com.example.domain.model.AppWallpaper
 import com.example.domain.model.ResolutionTier
 import com.example.domain.model.SortOption
-import com.example.domain.model.TrendingAnimeTopic
 import com.example.domain.model.WallpaperFilter
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import retrofit2.Response
 
 data class WallpaperFetchResult(
@@ -34,6 +42,16 @@ data class WallpaperFetchResult(
     val warningMessage: String? = null,
 )
 
+private sealed interface ApiCallOutcome<out T> {
+    data class Success<T>(val response: Response<T>) : ApiCallOutcome<T>
+    data class HttpFailure(
+        val code: Int,
+        val message: String,
+        val retryAfterSeconds: Long? = null,
+    ) : ApiCallOutcome<Nothing>
+    data class NetworkFailure(val throwable: Throwable) : ApiCallOutcome<Nothing>
+}
+
 class WallpaperRepository(
     private val wallhavenApi: WallhavenService,
     private val redditApi: RedditService,
@@ -42,13 +60,20 @@ class WallpaperRepository(
     private val wallhavenRateLimiter: WallhavenRateLimiter = WallhavenRateLimiter(),
 ) {
     companion object {
+        private const val TAG = "WallpaperRepository"
         const val HOME_TRENDING_KEY = "Home_Trending"
         private const val CACHE_TTL_MILLIS = 24L * 60L * 60L * 1000L // 24-hour Room cache
         private const val FORCE_REFRESH_MIN_INTERVAL_MS = 8_000L
     }
 
+    // Repository-owned scope decouples shared in-flight requests from individual caller cancellation.
+    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inFlightMutex = Mutex()
     private val inFlightStaticRequests = mutableMapOf<String, Deferred<WallpaperFetchResult>>()
+
+    fun close() {
+        repositoryScope.cancel()
+    }
 
     fun observeFavorites(): Flow<List<AppWallpaper>> {
         return wallpaperDao.observeFavorites().map { entities ->
@@ -113,12 +138,16 @@ class WallpaperRepository(
         page: Int = 2,
     ) = withContext(Dispatchers.IO) {
         if (wallhavenRateLimiter.remainingQuota() <= 15) return@withContext
-        runCatching {
+        try {
             fetchQueuedTrendingBatch(
                 filter = filter,
                 page = page,
                 forceRefresh = false,
             )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            runCatching { Log.w(TAG, "Prefetch trending batch failed: ${e.message}", e) }
         }
     }
 
@@ -150,14 +179,7 @@ class WallpaperRepository(
             )
         }
 
-        val cachedTimestamp = wallpaperDao.getCacheTimestamp(cacheKey)
-        val now = System.currentTimeMillis()
-        val isCacheFresh = cachedTimestamp != null &&
-            (now - cachedTimestamp) < CACHE_TTL_MILLIS
-        val isRecentlyRefreshed = cachedTimestamp != null &&
-            (now - cachedTimestamp) < FORCE_REFRESH_MIN_INTERVAL_MS
-
-        if ((!forceRefresh || isRecentlyRefreshed) && isCacheFresh && cachedEntities.isNotEmpty()) {
+        if (isCacheFreshAndEligible(cacheKey, forceRefresh) && cachedEntities.isNotEmpty()) {
             return@withContext WallpaperFetchResult(
                 wallpapers = cachedEntities.map { it.toDomain() },
                 isFromCache = true,
@@ -168,6 +190,17 @@ class WallpaperRepository(
         coalesceStaticFetch(normalizedQuery, cacheKey, cachedEntities, filter, page)
     }
 
+    private suspend fun isCacheFreshAndEligible(
+        cacheKey: String,
+        forceRefresh: Boolean,
+    ): Boolean {
+        val cachedTimestamp = wallpaperDao.getCacheTimestamp(cacheKey) ?: return false
+        val ageMillis = System.currentTimeMillis() - cachedTimestamp
+        val isCacheFresh = ageMillis < CACHE_TTL_MILLIS
+        val isRecentlyRefreshed = ageMillis < FORCE_REFRESH_MIN_INTERVAL_MS
+        return (!forceRefresh || isRecentlyRefreshed) && isCacheFresh
+    }
+
     /**
      * Progressive Trending Queue:
      * - Initial load (page 1): fetches first 3 hot anime (Frieren, Jujutsu Kaisen, JoJo)
@@ -175,8 +208,7 @@ class WallpaperRepository(
      * - Scroll page 3: next 2 in queue (Bleach TYBW, The Apothecary Diaries)
      * - Scroll page 4: final 2 in queue (Daemons of the Shadow Realm, Solo Leveling)
      * - Scroll page 5+: paginates subsequent Wallhaven pages across the trending queue
-     * Each series is cached independently in Room (24h) and gated by WallhavenRateLimiter
-     * so opening the app uses at most 3 Wallhaven requests and never hits the 45 req/min cap.
+     * All topics within a batch execute concurrently via async/awaitAll.
      */
     private suspend fun fetchQueuedTrendingBatch(
         filter: WallpaperFilter,
@@ -205,40 +237,36 @@ class WallpaperRepository(
             roundTopics to extraPage
         }
 
-        val perTopicResults = mutableListOf<Pair<TrendingAnimeTopic, WallpaperFetchResult>>()
-        for (topic in batchTopics) {
-            val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
-            val topicCached = wallpaperDao.getCachedWallpapers(topicCacheKey)
-            val topicTs = wallpaperDao.getCacheTimestamp(topicCacheKey)
-            val now = System.currentTimeMillis()
-            val isFresh = topicTs != null && (now - topicTs) < CACHE_TTL_MILLIS
-            val isRecent = topicTs != null && (now - topicTs) < FORCE_REFRESH_MIN_INTERVAL_MS
-
-            val result = if ((!forceRefresh || isRecent) && isFresh && topicCached.isNotEmpty()) {
-                WallpaperFetchResult(
-                    wallpapers = topicCached.map { it.toDomain() },
-                    isFromCache = true,
-                    hasMore = true,
-                )
-            } else {
-                coalesceStaticFetch(
-                    query = topic.title,
-                    cacheKey = topicCacheKey,
-                    staleCache = topicCached,
-                    filter = filter,
-                    page = topicPage,
-                    skipRedditUnlessNeeded = true,
-                )
+        val perTopicResults = batchTopics.map { topic ->
+            async {
+                val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
+                val topicCached = wallpaperDao.getCachedWallpapers(topicCacheKey)
+                val result = if (isCacheFreshAndEligible(topicCacheKey, forceRefresh) && topicCached.isNotEmpty()) {
+                    WallpaperFetchResult(
+                        wallpapers = topicCached.map { it.toDomain() },
+                        isFromCache = true,
+                        hasMore = true,
+                    )
+                } else {
+                    coalesceStaticFetch(
+                        query = topic.title,
+                        cacheKey = topicCacheKey,
+                        staleCache = topicCached,
+                        filter = filter,
+                        page = topicPage,
+                        skipRedditUnlessNeeded = true,
+                    )
+                }
+                topic to result
             }
-            perTopicResults.add(topic to result)
-        }
+        }.awaitAll()
 
         val interleaved = interleaveSeriesWallpapers(perTopicResults.map { it.second.wallpapers })
         val anyRateLimited = perTopicResults.any { it.second.rateLimited }
         val allFromCache = perTopicResults.isNotEmpty() && perTopicResults.all { it.second.isFromCache }
         val warning = perTopicResults.firstNotNullOfOrNull { it.second.warningMessage }
         val canLoadMoreQueue = page < queueBatches.size ||
-            (!anyRateLimited && perTopicResults.any { it.second.hasMore })
+                (!anyRateLimited && perTopicResults.any { it.second.hasMore })
 
         WallpaperFetchResult(
             wallpapers = interleaved,
@@ -263,6 +291,11 @@ class WallpaperRepository(
         return merged.distinctBy { it.id }
     }
 
+    /**
+     * Coalesces concurrent requests for the same [cacheKey] on [repositoryScope].
+     * Uses CoroutineStart.LAZY + NonCancellable cleanup so cancelling one caller
+     * never aborts a shared in-flight request or leaks entries in [inFlightStaticRequests].
+     */
     private suspend fun coalesceStaticFetch(
         query: String,
         cacheKey: String,
@@ -270,26 +303,69 @@ class WallpaperRepository(
         filter: WallpaperFilter,
         page: Int,
         skipRedditUnlessNeeded: Boolean = false,
-    ): WallpaperFetchResult = coroutineScope {
-        val existing = inFlightMutex.withLock { inFlightStaticRequests[cacheKey] }
-        if (existing != null && existing.isActive) {
-            return@coroutineScope existing.await()
-        }
-
-        val created = async {
-            fetchStaticWallpapers(query, cacheKey, staleCache, filter, page, skipRedditUnlessNeeded)
-        }
-        inFlightMutex.withLock {
-            inFlightStaticRequests[cacheKey] = created
-        }
-        try {
-            created.await()
-        } finally {
-            inFlightMutex.withLock {
-                if (inFlightStaticRequests[cacheKey] === created) {
-                    inFlightStaticRequests.remove(cacheKey)
+    ): WallpaperFetchResult {
+        var createdRef: Deferred<WallpaperFetchResult>? = null
+        val deferred = inFlightMutex.withLock {
+            val existing = inFlightStaticRequests[cacheKey]
+            if (existing != null && existing.isActive) {
+                existing
+            } else {
+                repositoryScope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        fetchStaticWallpapers(
+                            query = query,
+                            cacheKey = cacheKey,
+                            staleCache = staleCache,
+                            filter = filter,
+                            page = page,
+                            skipRedditUnlessNeeded = skipRedditUnlessNeeded,
+                        )
+                    } finally {
+                        withContext(NonCancellable) {
+                            inFlightMutex.withLock {
+                                if (inFlightStaticRequests[cacheKey] === createdRef) {
+                                    inFlightStaticRequests.remove(cacheKey)
+                                }
+                            }
+                        }
+                    }
+                }.also {
+                    createdRef = it
+                    inFlightStaticRequests[cacheKey] = it
                 }
             }
+        }
+        deferred.start()
+        return deferred.await()
+    }
+
+    private suspend fun <T> safeApiCall(
+        sourceName: String,
+        block: suspend () -> Response<T>,
+    ): ApiCallOutcome<T> {
+        return try {
+            val response = block()
+            if (response.isSuccessful) {
+                ApiCallOutcome.Success(response)
+            } else {
+                val code = response.code()
+                val retryAfter = response.headers()["Retry-After"]?.toLongOrNull()
+                runCatching {
+                    Log.w(TAG, "$sourceName HTTP $code: ${response.message()}")
+                }
+                ApiCallOutcome.HttpFailure(
+                    code = code,
+                    message = response.message(),
+                    retryAfterSeconds = retryAfter,
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            runCatching {
+                Log.w(TAG, "$sourceName request failed: ${e.message}", e)
+            }
+            ApiCallOutcome.NetworkFailure(e)
         }
     }
 
@@ -304,7 +380,6 @@ class WallpaperRepository(
         val isHomeTrending = query == HOME_TRENDING_KEY
         val trendingTopic = if (isHomeTrending) null else AnimeCatalog.findTrendingTopic(query)
 
-        // Home Trending uses a single Wallhaven toplist request without keyword for mixed hot anime
         val wallhavenQuery = when {
             isHomeTrending -> null
             trendingTopic != null -> trendingTopic.query
@@ -331,7 +406,7 @@ class WallpaperRepository(
         var localQuotaLimited = false
         var retryAfterSec = 0L
 
-        val wallhavenTask = async<Response<WallhavenResponse>?> {
+        val wallhavenTask = async<ApiCallOutcome<WallhavenResponse>?> {
             when (val decision = wallhavenRateLimiter.tryAcquire()) {
                 is WallhavenRateLimiter.AcquireResult.RateLimited -> {
                     localQuotaLimited = true
@@ -340,8 +415,8 @@ class WallpaperRepository(
                 }
 
                 WallhavenRateLimiter.AcquireResult.Allowed -> {
-                    try {
-                        val response = wallhavenApi.searchAnime(
+                    val outcome = safeApiCall("Wallhaven") {
+                        wallhavenApi.searchAnime(
                             query = wallhavenQuery,
                             categories = wallhavenCategories,
                             purity = wallhavenPurity,
@@ -352,70 +427,68 @@ class WallpaperRepository(
                             topRange = if (wallhavenSorting == "toplist") "1y" else null,
                             page = wallhavenPage,
                         )
-                        if (response.code() == 429) {
-                            val retryAfterHeader = response.headers()["Retry-After"]?.toLongOrNull()
-                            wallhavenRateLimiter.recordServerRateLimit(retryAfterHeader)
-                            retryAfterSec = retryAfterHeader ?: 45L
-                        }
-                        response
-                    } catch (_: Exception) {
-                        null
                     }
+                    if (outcome is ApiCallOutcome.HttpFailure && outcome.code == 429) {
+                        wallhavenRateLimiter.recordServerRateLimit(outcome.retryAfterSeconds)
+                        retryAfterSec = outcome.retryAfterSeconds ?: 45L
+                    }
+                    outcome
                 }
             }
         }
         val redditAnimeWallpaperTask = async {
             if (page > 1 || skipRedditUnlessNeeded) return@async null
-            try {
+            safeApiCall("Reddit/Animewallpaper") {
                 redditApi.searchSubreddit(
                     subreddit = "Animewallpaper",
                     query = redditQuery,
                     sort = filter.sort.redditSort,
                     limit = 50,
                 )
-            } catch (_: Exception) {
-                null
             }
         }
         val redditMoescapeTask = async {
             if (page > 1 || skipRedditUnlessNeeded) return@async null
-            try {
+            safeApiCall("Reddit/Moescape") {
                 redditApi.searchSubreddit(
                     subreddit = "Moescape",
                     query = redditQuery,
                     sort = filter.sort.redditSort,
                     limit = 35,
                 )
-            } catch (_: Exception) {
-                null
             }
         }
 
-        val wallhavenResponse = wallhavenTask.await()
-        val rateLimited = localQuotaLimited || wallhavenResponse?.code() == 429
-        val wallhavenItems = wallhavenResponse?.body()?.data.orEmpty()
+        val wallhavenOutcome = wallhavenTask.await()
+        val rateLimited = localQuotaLimited ||
+                (wallhavenOutcome is ApiCallOutcome.HttpFailure && wallhavenOutcome.code == 429)
+        val wallhavenItems = (wallhavenOutcome as? ApiCallOutcome.Success)?.response?.body()?.data.orEmpty()
 
         // In queued multi-topic batches, only call Reddit as a fallback if Wallhaven is empty or rate-limited
-        val fallbackRedditResponse = if (skipRedditUnlessNeeded && page == 1 && (rateLimited || wallhavenItems.size < 4)) {
-            try {
+        val fallbackRedditOutcome = if (skipRedditUnlessNeeded && page == 1 && (rateLimited || wallhavenItems.size < 4)) {
+            safeApiCall("Reddit/Animewallpaper-fallback") {
                 redditApi.searchSubreddit(
                     subreddit = "Animewallpaper",
                     query = redditQuery,
                     sort = filter.sort.redditSort,
                     limit = 25,
                 )
-            } catch (_: Exception) {
-                null
             }
         } else {
             null
         }
 
-        val redditResponses = listOfNotNull(
+        val redditOutcomes = listOfNotNull(
             redditAnimeWallpaperTask.await(),
             redditMoescapeTask.await(),
-            fallbackRedditResponse,
+            fallbackRedditOutcome,
         )
+        val redditResponses = redditOutcomes.mapNotNull { (it as? ApiCallOutcome.Success)?.response }
+
+        val hadNetworkOrHttpError = (wallhavenOutcome is ApiCallOutcome.NetworkFailure) ||
+                (wallhavenOutcome is ApiCallOutcome.HttpFailure && wallhavenOutcome.code != 429) ||
+                redditOutcomes.any { it is ApiCallOutcome.NetworkFailure || it is ApiCallOutcome.HttpFailure }
+
         val combined = mutableListOf<AppWallpaper>()
         val displaySeries = when {
             isHomeTrending -> "Hot Anime"
@@ -423,13 +496,17 @@ class WallpaperRepository(
             else -> query
         }
         wallhavenItems.forEach { item ->
+            val safeImageUrl = sanitizeHttpsUrl(item.path) ?: return@forEach
+            val safeThumbUrl = sanitizeHttpsUrl(item.thumbs.large)
+                ?: sanitizeHttpsUrl(item.thumbs.original)
+                ?: safeImageUrl
             combined.add(
                 AppWallpaper(
                     id = "wh_${item.id}",
-                    title = "$displaySeries • ${item.dimensionX}×${item.dimensionY}",
+                    title = "$displaySeries • item.dimensionX×{item.dimensionY}",
                     animeSeries = displaySeries,
-                    imageUrl = item.path,
-                    thumbnailUrl = item.thumbs.large ?: item.thumbs.original,
+                    imageUrl = safeImageUrl,
+                    thumbnailUrl = safeThumbUrl,
                     videoUrl = null,
                     isLive = false,
                     width = item.dimensionX,
@@ -492,10 +569,10 @@ class WallpaperRepository(
                 isFromCache = true,
                 rateLimited = rateLimited,
                 hasMore = false,
-                warningMessage = if (rateLimited) {
-                    "Wallhaven rate guard active — showing cached wallpapers."
-                } else {
-                    "Offline or no new results. Showing cached wallpapers."
+                warningMessage = when {
+                    rateLimited -> "Wallhaven rate guard active — showing cached wallpapers."
+                    hadNetworkOrHttpError -> "Network error while refreshing. Showing cached wallpapers."
+                    else -> "Offline or no new results. Showing cached wallpapers."
                 },
             )
         } else {
@@ -504,11 +581,15 @@ class WallpaperRepository(
                 isFromCache = false,
                 rateLimited = rateLimited,
                 hasMore = false,
-                warningMessage = if (rateLimited) {
-                    val waitHint = if (retryAfterSec > 0L) " (~${retryAfterSec}s)" else ""
-                    "Wallhaven rate limit reached (45 req/min)$waitHint. Please wait a moment."
-                } else {
-                    null
+                warningMessage = when {
+                    rateLimited -> {
+                        val waitHint = if (retryAfterSec > 0L) " (~${retryAfterSec}s)" else ""
+                        "Wallhaven rate limit reached (45 req/min)$waitHint. Please wait a moment."
+                    }
+                    hadNetworkOrHttpError -> {
+                        "Unable to reach wallpaper servers. Check your connection and try again."
+                    }
+                    else -> null
                 },
             )
         }
@@ -551,60 +632,54 @@ class WallpaperRepository(
         }
 
         val animeWallpaperTask = async {
-            try {
+            safeApiCall("Reddit/Animewallpaper-live") {
                 redditApi.searchSubreddit(
                     subreddit = "Animewallpaper",
                     query = baseQuery,
                     sort = filter.sort.redditSort,
                     limit = 50,
                 )
-            } catch (_: Exception) {
-                null
             }
         }
         val wallpaperEngineTask = async {
-            try {
+            safeApiCall("Reddit/wallpaperengine-live") {
                 redditApi.searchSubreddit(
                     subreddit = "wallpaperengine",
                     query = searchTerm,
                     sort = filter.sort.redditSort,
                     limit = 50,
                 )
-            } catch (_: Exception) {
-                null
             }
         }
         val animeGifsTask = async {
-            try {
+            safeApiCall("Reddit/animegifs-live") {
                 redditApi.searchSubreddit(
                     subreddit = "animegifs",
                     query = baseQuery,
                     sort = filter.sort.redditSort,
                     limit = 40,
                 )
-            } catch (_: Exception) {
-                null
             }
         }
         val shortClipsTask = async {
-            try {
+            safeApiCall("Reddit/AnimeShortClips-live") {
                 redditApi.searchSubreddit(
                     subreddit = "AnimeShortClips",
                     query = baseQuery,
                     sort = "top",
                     limit = 30,
                 )
-            } catch (_: Exception) {
-                null
             }
         }
 
-        val results = listOfNotNull(
+        val outcomes = listOf(
             animeWallpaperTask.await(),
             wallpaperEngineTask.await(),
             animeGifsTask.await(),
             shortClipsTask.await(),
         )
+        val results = outcomes.mapNotNull { (it as? ApiCallOutcome.Success)?.response }
+        val allFailed = outcomes.all { it is ApiCallOutcome.NetworkFailure || it is ApiCallOutcome.HttpFailure }
 
         val liveWallpapers = mutableListOf<AppWallpaper>()
 
@@ -653,11 +728,34 @@ class WallpaperRepository(
                 wallpapers = staleCache.map { it.toDomain() },
                 isFromCache = true,
                 hasMore = false,
-                warningMessage = "Showing cached live MP4 wallpapers.",
+                warningMessage = if (allFailed) {
+                    "Network error while loading live wallpapers. Showing cached results."
+                } else {
+                    "Showing cached live MP4 wallpapers."
+                },
             )
         } else {
-            WallpaperFetchResult(wallpapers = emptyList(), hasMore = false)
+            WallpaperFetchResult(
+                wallpapers = emptyList(),
+                hasMore = false,
+                warningMessage = if (allFailed) {
+                    "Unable to reach live wallpaper sources. Check your connection and try again."
+                } else {
+                    null
+                },
+            )
         }
+    }
+
+    private fun sanitizeHttpsUrl(rawUrl: String?): String? {
+        val cleaned = rawUrl?.replace("&amp;", "&")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val upgraded = if (cleaned.startsWith("http://", ignoreCase = true)) {
+            "https://" + cleaned.substring(7)
+        } else {
+            cleaned
+        }
+        val parsed = upgraded.toHttpUrlOrNull() ?: return null
+        return if (parsed.isHttps) parsed.toString() else null
     }
 
     private data class ExtractedRedditImage(
@@ -670,21 +768,19 @@ class WallpaperRepository(
     private fun extractStaticRedditImage(post: RedditPost): ExtractedRedditImage? {
         val previewImage = post.preview?.images?.firstOrNull()
         val previewSource = previewImage?.source
-        val cleanPostUrl = post.url.replace("&amp;", "&").trim()
-        val lowerUrl = cleanPostUrl.lowercase().substringBefore("?")
+        val cleanPostUrl = sanitizeHttpsUrl(post.url)
+        val lowerUrl = cleanPostUrl?.lowercase()?.substringBefore("?").orEmpty()
         val isDirectImageHost = lowerUrl.endsWith(".jpg") ||
-            lowerUrl.endsWith(".jpeg") ||
-            lowerUrl.endsWith(".png") ||
-            lowerUrl.endsWith(".webp") ||
-            lowerUrl.contains("i.redd.it/") ||
-            lowerUrl.contains("i.imgur.com/")
+                lowerUrl.endsWith(".jpeg") ||
+                lowerUrl.endsWith(".png") ||
+                lowerUrl.endsWith(".webp") ||
+                lowerUrl.contains("i.redd.it/") ||
+                lowerUrl.contains("i.imgur.com/")
 
-        val previewSourceUrl = previewSource?.url?.replace("&amp;", "&")?.takeIf {
-            it.startsWith("http")
-        }
+        val previewSourceUrl = sanitizeHttpsUrl(previewSource?.url)
 
         val originalUrl = when {
-            isDirectImageHost && cleanPostUrl.startsWith("http") -> cleanPostUrl
+            isDirectImageHost && cleanPostUrl != null -> cleanPostUrl
             previewSourceUrl != null && post.postHint != "link" -> previewSourceUrl
             previewSourceUrl != null && post.postHint == "image" -> previewSourceUrl
             else -> null
@@ -715,18 +811,19 @@ class WallpaperRepository(
 
     private fun extractMp4Url(post: RedditPost): String? {
         if (post.url.substringBefore("?").endsWith(".mp4", ignoreCase = true)) {
-            return post.url.replace("&amp;", "&")
+            sanitizeHttpsUrl(post.url)?.let { return it }
         }
         val redditVideo = post.secureMedia?.redditVideo
             ?: post.media?.redditVideo
             ?: post.preview?.redditVideoPreview
-        val fallback = redditVideo?.fallbackUrl?.replace("&amp;", "&")
-        if (!fallback.isNullOrBlank() && fallback.contains(".mp4", ignoreCase = true)) {
+        val fallback = sanitizeHttpsUrl(redditVideo?.fallbackUrl)
+        if (fallback != null && fallback.contains(".mp4", ignoreCase = true)) {
             return fallback
         }
-        val mp4Variant = post.preview?.images?.firstOrNull()?.variants?.mp4?.source?.url
-            ?.replace("&amp;", "&")
-        if (!mp4Variant.isNullOrBlank()) {
+        val mp4Variant = sanitizeHttpsUrl(
+            post.preview?.images?.firstOrNull()?.variants?.mp4?.source?.url,
+        )
+        if (mp4Variant != null) {
             return mp4Variant
         }
         return null
@@ -735,16 +832,9 @@ class WallpaperRepository(
     private fun resolveRedditThumbnail(post: RedditPost): String? {
         val resolutions = post.preview?.images?.firstOrNull()?.resolutions.orEmpty()
         val medium = resolutions.firstOrNull { it.width in 320..720 } ?: resolutions.lastOrNull()
-        val resolutionUrl = medium?.url?.replace("&amp;", "&")
-        if (!resolutionUrl.isNullOrBlank() && resolutionUrl.startsWith("http")) {
-            return resolutionUrl
-        }
-        val rawThumb = post.thumbnail.replace("&amp;", "&")
-        if (rawThumb.startsWith("http")) {
-            return rawThumb
-        }
-        val sourceUrl = post.preview?.images?.firstOrNull()?.source?.url?.replace("&amp;", "&")
-        return sourceUrl?.takeIf { it.startsWith("http") }
+        sanitizeHttpsUrl(medium?.url)?.let { return it }
+        sanitizeHttpsUrl(post.thumbnail)?.let { return it }
+        return sanitizeHttpsUrl(post.preview?.images?.firstOrNull()?.source?.url)
     }
 
     private fun buildCacheKey(
@@ -754,7 +844,7 @@ class WallpaperRepository(
         page: Int,
     ): String {
         val type = if (isLive) "live" else "static"
-        return "$type:${query.lowercase()}:${filter.resolution.name}:${filter.sort.name}:${filter.ratio.name}:p$page"
+        return "type:{query.lowercase()}:filter.resolution.name:{filter.sort.name}:filter.ratio.name:ppage"
     }
 
     private fun CachedWallpaperEntity.toDomain(): AppWallpaper = AppWallpaper(
@@ -786,3 +876,4 @@ class WallpaperRepository(
             positionIndex = index,
         )
 }
+

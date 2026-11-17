@@ -13,7 +13,7 @@ object AdMobConstants {
 
     // Strict Frequency Capping & Placement Policy Intervals
     const val INTERSTITIAL_COOLDOWN_MS = 200_000L // Strict 200 seconds between interstitials
-    const val DETAIL_VIEW_BACK_THRESHOLD = 24 // Condition A: 8 detailed images viewed before Back
+    const val DETAIL_VIEW_BACK_THRESHOLD = 24 // Condition A: 24 detailed images viewed before Back
     const val GRID_NATIVE_AD_INTERVAL = 6 // Every 6 wallpaper items (6-8 range, clean 2-col row break)
     const val DETAIL_PAGER_NATIVE_AD_INTERVAL = 3 // Every 3 wallpaper images swiped in HorizontalPager
 

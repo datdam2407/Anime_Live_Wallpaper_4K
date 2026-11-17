@@ -1,5 +1,6 @@
 package com.example.ui.state
 
+
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -37,11 +38,13 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+
 sealed interface FeedStatus {
     data object Loading : FeedStatus
     data class Success(val items: List<AppWallpaper>) : FeedStatus
     data class Error(val message: String) : FeedStatus
 }
+
 
 data class HomeUiState(
     val activeQuery: String = WallpaperRepository.HOME_TRENDING_KEY,
@@ -61,11 +64,18 @@ data class HomeUiState(
     val appliedSuccessTarget: String? = null,
 )
 
+
 sealed interface UiEvent {
     data class ShowMessage(val text: String) : UiEvent
     data class LaunchLiveWallpaperChooser(val target: WallpaperTarget = WallpaperTarget.BOTH) : UiEvent
+    data class LaunchWallpaperRequestEmail(
+        val targetEmail: String,
+        val userEmail: String,
+        val content: String,
+    ) : UiEvent
     data object WallpaperApplied : UiEvent
 }
+
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val container = (application as KuroWallApplication).container
@@ -73,6 +83,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val settingsStore = container.settingsDataStore
     private val bitmapCropper = container.bitmapCropper
     private val mediaDownloadManager = container.mediaDownloadManager
+
 
     private val _rawState = MutableStateFlow(HomeUiState())
     private val _categories = MutableStateFlow(AnimeCatalog.allTwoHundred)
@@ -84,14 +95,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _events = MutableSharedFlow<UiEvent>()
     val events: SharedFlow<UiEvent> = _events.asSharedFlow()
 
+
     val favoriteIds: StateFlow<Set<String>> = repository.observeFavoriteIds()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
 
     val favorites: StateFlow<List<AppWallpaper>> = repository.observeFavorites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+
     val settings: StateFlow<UserSettings> = settingsStore.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), UserSettings())
+
 
     val homeState: StateFlow<HomeUiState> = combine(_rawState, favoriteIds) { state, favIds ->
         val updatedStatus = when (val status = state.feedStatus) {
@@ -104,7 +119,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         state.copy(feedStatus = updatedStatus, trendingBanners = updatedBanners)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
+
     val categoryFilterText: StateFlow<String> = _categoryFilterText.asStateFlow()
+
 
     val filteredCategories: StateFlow<List<AnimeCategory>> =
         combine(_categories, _categoryFilterText) { all, query ->
@@ -114,10 +131,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 all.filter {
                     it.title.contains(trimmed, ignoreCase = true) ||
-                        it.genreTag.contains(trimmed, ignoreCase = true)
+                            it.genreTag.contains(trimmed, ignoreCase = true)
                 }
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AnimeCatalog.allTwoHundred)
+
 
     init {
         viewModelScope.launch {
@@ -135,9 +153,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     private fun loadInitialTrendingAndFeed() {
         loadFeed(forceRefresh = false)
     }
+
 
     private fun enqueueImageWarmup(urls: List<String>, widthPx: Int = 540, heightPx: Int = 960) {
         val app = getApplication<Application>()
@@ -158,6 +178,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
     }
 
+
     fun onSearchInputChange(value: String) {
         _rawState.update { it.copy(searchInput = value) }
         val trimmed = value.trim()
@@ -175,6 +196,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     fun submitSearch(queryOverride: String? = null) {
         searchDebounceJob?.cancel()
         val targetQuery = (queryOverride ?: _rawState.value.searchInput).trim()
@@ -188,10 +210,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadFeed(forceRefresh = false)
     }
 
+
     fun selectTrendingTopic(topic: String) {
         searchDebounceJob?.cancel()
         val isReset = topic.equals("anime", ignoreCase = true) ||
-            _rawState.value.activeQuery.equals(topic, ignoreCase = true)
+                _rawState.value.activeQuery.equals(topic, ignoreCase = true)
         val normalized = if (isReset) {
             WallpaperRepository.HOME_TRENDING_KEY
         } else {
@@ -206,12 +229,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadFeed(forceRefresh = false)
     }
 
+
     fun selectTab(isLive: Boolean) {
         if (_rawState.value.isLiveTab == isLive) return
         searchDebounceJob?.cancel()
         _rawState.update { it.copy(isLiveTab = isLive) }
         loadFeed(forceRefresh = false)
     }
+
 
     fun applyFilter(newFilter: WallpaperFilter) {
         searchDebounceJob?.cancel()
@@ -222,11 +247,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadFeed(forceRefresh = false)
     }
 
+
     fun refreshFeed() {
         searchDebounceJob?.cancel()
         _rawState.update { it.copy(isRefreshing = true) }
         loadFeed(forceRefresh = true)
     }
+
 
     fun loadMore() {
         val current = _rawState.value
@@ -265,6 +292,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     fun selectAnimeCategory(category: AnimeCategory) {
         searchDebounceJob?.cancel()
         _rawState.update {
@@ -276,9 +304,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadFeed(forceRefresh = false)
     }
 
+
     fun updateCategorySearch(query: String) {
         _categoryFilterText.value = query
     }
+
 
     private fun loadFeed(forceRefresh: Boolean) {
         val current = _rawState.value
@@ -348,6 +378,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     private fun pickDistinctSeriesBanners(
         wallpapers: List<AppWallpaper>,
         limit: Int,
@@ -362,6 +393,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     fun toggleFavorite(wallpaper: AppWallpaper) {
         viewModelScope.launch {
             val nowFav = repository.toggleFavorite(wallpaper)
@@ -372,6 +404,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
     }
+
 
     fun setStaticWallpaper(wallpaper: AppWallpaper, target: WallpaperTarget) {
         viewModelScope.launch {
@@ -397,9 +430,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     fun dismissAppliedSuccess() {
         _rawState.update { it.copy(appliedSuccessTarget = null) }
     }
+
 
     fun applyLiveWallpaper(
         wallpaper: AppWallpaper,
@@ -408,6 +443,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val videoUrl = wallpaper.videoUrl ?: return
         if (_rawState.value.isProcessingAction) return
 
+
         _rawState.update {
             it.copy(
                 isProcessingAction = true,
@@ -415,6 +451,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 processingLabel = "Preparing Live Wallpaper…",
             )
         }
+
 
         viewModelScope.launch {
             mediaDownloadManager.downloadLiveWallpaper(videoUrl).collect { downloadState ->
@@ -430,6 +467,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
+
                     is LiveDownloadState.Success -> {
                         settingsStore.setActiveLiveWallpaper(downloadState.file.absolutePath, wallpaper.title)
                         _rawState.update {
@@ -442,6 +480,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         _events.emit(UiEvent.LaunchLiveWallpaperChooser(target))
                     }
+
 
                     is LiveDownloadState.Error -> {
                         _rawState.update {
@@ -458,6 +497,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     fun updatePreferredResolution(tier: ResolutionTier) {
         viewModelScope.launch {
             settingsStore.setPreferredResolution(tier)
@@ -466,19 +506,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     fun setMuteLiveWallpaper(muted: Boolean) {
         viewModelScope.launch {
             settingsStore.setMuteLiveWallpaper(muted)
         }
     }
 
+
     fun submitWallpaperRequest(email: String, content: String) {
+        val trimmedEmail = email.trim()
+        val trimmedContent = content.trim()
+        if (trimmedContent.isEmpty()) {
+            viewModelScope.launch {
+                _events.emit(UiEvent.ShowMessage("Please enter details about the wallpaper you want to request."))
+            }
+            return
+        }
         viewModelScope.launch {
             _events.emit(
-                UiEvent.ShowMessage("Thanks! Your wallpaper request has been queued for review."),
+                UiEvent.LaunchWallpaperRequestEmail(
+                    targetEmail = REQUEST_SUPPORT_EMAIL,
+                    userEmail = trimmedEmail,
+                    content = trimmedContent,
+                ),
             )
         }
     }
+
 
     fun notifySelectLiveWallpaperFirst() {
         viewModelScope.launch {
@@ -488,6 +543,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     fun onLiveWallpaperAppliedSuccess(target: WallpaperTarget = WallpaperTarget.BOTH) {
         viewModelScope.launch {
             _events.emit(
@@ -495,6 +551,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
     }
+
 
     fun getCurrentFeedList(feedSource: String): List<AppWallpaper> {
         return if (feedSource == com.example.ui.navigation.DetailRoute.FEED_FAVORITES) {
@@ -507,7 +564,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+
     companion object {
+        const val REQUEST_SUPPORT_EMAIL = "damtiendat24072000@gmail.com"
+
+
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as Application
@@ -516,3 +577,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 }
+
+
+
+

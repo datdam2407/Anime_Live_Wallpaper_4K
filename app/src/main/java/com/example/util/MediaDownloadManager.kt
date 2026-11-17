@@ -8,11 +8,15 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import com.example.domain.model.AppWallpaper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -29,23 +33,24 @@ sealed interface LiveDownloadState {
 /**
  * Handles downloading high-res images & MP4 live loops to device Gallery (via scoped MediaStore,
  * requiring zero broad storage permissions) and caching MP4 files locally using A/B alternating
- * slots (wallpaper_a.mp4 <-> wallpaper_b.mp4) with progress emission for smooth WallpaperService hot-swap.
+ * slots (wallpaper_a.mp4 <-> wallpaper_b.mp4) serialized by [downloadMutex] with atomic temp files.
  */
 class MediaDownloadManager(
     private val context: Context,
-    private val okHttpClient: OkHttpClient,
+    private val mediaOkHttpClient: OkHttpClient,
 ) {
     companion object {
         private const val PREF_NAME = "live_wallpaper_prefs"
         private const val KEY_ACTIVE_FILE = "active_video_filename"
         const val FILE_SLOT_A = "wallpaper_a.mp4"
         const val FILE_SLOT_B = "wallpaper_b.mp4"
-        private const val TEMP_DOWNLOAD_FILE = "downloading_live_temp.tmp"
         const val ACTION_RELOAD_WALLPAPER = "com.example.ACTION_RELOAD_WALLPAPER"
+        private val SAFE_ID_REGEX = Regex("[^A-Za-z0-9_-]")
 
         fun getActiveLiveVideoFile(context: Context): File {
             val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            val fileName = prefs.getString(KEY_ACTIVE_FILE, FILE_SLOT_A) ?: FILE_SLOT_A
+            val rawName = prefs.getString(KEY_ACTIVE_FILE, FILE_SLOT_A)
+            val fileName = if (rawName == FILE_SLOT_B) FILE_SLOT_B else FILE_SLOT_A
             val preferredFile = File(context.filesDir, fileName)
             if (preferredFile.exists() && preferredFile.length() > 0L) {
                 return preferredFile
@@ -60,23 +65,54 @@ class MediaDownloadManager(
         }
     }
 
+    // Serializes live MP4 downloads and A/B slot swaps to prevent concurrent file corruption.
+    private val downloadMutex = Mutex()
+
     private val videoDownloadClient: OkHttpClient by lazy {
-        okHttpClient.newBuilder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .build()
+        if (mediaOkHttpClient.connectTimeoutMillis >= 30_000 &&
+            mediaOkHttpClient.readTimeoutMillis >= 60_000
+        ) {
+            mediaOkHttpClient
+        } else {
+            mediaOkHttpClient.newBuilder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS)
+                .build()
+        }
+    }
+
+    private fun validateHttpsUrl(rawUrl: String): String {
+        val trimmed = rawUrl.trim()
+        val upgraded = if (trimmed.startsWith("http://", ignoreCase = true)) {
+            "https://" + trimmed.substring(7)
+        } else {
+            trimmed
+        }
+        val parsed = upgraded.toHttpUrlOrNull()
+            ?: throw IllegalArgumentException("Invalid media URL.")
+        require(parsed.isHttps) { "Insecure URL scheme blocked. HTTPS is required." }
+        return parsed.toString()
+    }
+
+    private fun sanitizeFileId(rawId: String): String {
+        return rawId.replace(SAFE_ID_REGEX, "_")
+            .trim('_')
+            .take(64)
+            .ifEmpty { "wallpaper" }
     }
 
     suspend fun saveToGallery(wallpaper: AppWallpaper): Result<Uri> = withContext(Dispatchers.IO) {
-        runCatching {
-            val url = if (wallpaper.isLive) {
+        try {
+            val rawUrl = if (wallpaper.isLive) {
                 wallpaper.videoUrl ?: error("Live video URL unavailable.")
             } else {
                 wallpaper.imageUrl
             }
-            val isMp4 = wallpaper.isLive || url.endsWith(".mp4", ignoreCase = true)
-            val isPng = !isMp4 && url.endsWith(".png", ignoreCase = true)
+            val safeUrl = validateHttpsUrl(rawUrl)
+            val cleanUrlPath = safeUrl.substringBefore("?")
+            val isMp4 = wallpaper.isLive || cleanUrlPath.endsWith(".mp4", ignoreCase = true)
+            val isPng = !isMp4 && cleanUrlPath.endsWith(".png", ignoreCase = true)
             val extension = when {
                 isMp4 -> "mp4"
                 isPng -> "png"
@@ -88,7 +124,8 @@ class MediaDownloadManager(
                 else -> "image/jpeg"
             }
 
-            val safeName = "KuroWall_${wallpaper.id}_${System.currentTimeMillis()}.$extension"
+            val safeId = sanitizeFileId(wallpaper.id)
+            val safeName = "KuroWall_${safeId}_${System.currentTimeMillis()}.$extension"
             val collection = if (isMp4) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -122,7 +159,7 @@ class MediaDownloadManager(
                 ?: error("Could not create MediaStore entry.")
 
             try {
-                val request = Request.Builder().url(url).build()
+                val request = Request.Builder().url(safeUrl).build()
                 videoDownloadClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         error("Download failed with HTTP ${response.code}")
@@ -138,94 +175,111 @@ class MediaDownloadManager(
                     values.put(MediaStore.MediaColumns.IS_PENDING, 0)
                     resolver.update(uri, values, null, null)
                 }
-                uri
+                Result.success(uri)
+            } catch (e: CancellationException) {
+                resolver.delete(uri, null, null)
+                throw e
             } catch (e: Throwable) {
                 resolver.delete(uri, null, null)
                 throw e
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
     /**
-     * Streams an MP4 video into an alternating local slot (wallpaper_a.mp4 <-> wallpaper_b.mp4)
-     * with real-time 0..100 progress emissions, then signals WallpaperService to hot-swap immediately.
+     * Streams an MP4 video into an isolated temp file inside [downloadMutex], then atomically swaps
+     * alternating local slots (wallpaper_a.mp4 <-> wallpaper_b.mp4) and signals WallpaperService.
      */
     fun downloadLiveWallpaper(videoUrl: String): Flow<LiveDownloadState> = flow {
         emit(LiveDownloadState.Downloading(0))
 
-        val tempFile = File(context.filesDir, TEMP_DOWNLOAD_FILE)
-        try {
-            val request = Request.Builder().url(videoUrl).build()
-            videoDownloadClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    emit(LiveDownloadState.Error("Không tải được video (HTTP ${response.code})"))
-                    return@flow
-                }
-                val body = response.body ?: run {
-                    emit(LiveDownloadState.Error("File video rỗng"))
-                    return@flow
-                }
+        downloadMutex.withLock {
+            var tempFile: File? = null
+            try {
+                val safeUrl = validateHttpsUrl(videoUrl)
+                val createdTemp = File.createTempFile("live_dl_", ".mp4.tmp", context.filesDir)
+                tempFile = createdTemp
 
-                val totalBytes = body.contentLength()
-                var downloadedBytes = 0L
+                val request = Request.Builder().url(safeUrl).build()
+                videoDownloadClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        emit(LiveDownloadState.Error("Failed to download video (HTTP ${response.code})"))
+                        return@withLock
+                    }
+                    val body = response.body ?: run {
+                        emit(LiveDownloadState.Error("Video response body is empty"))
+                        return@withLock
+                    }
 
-                val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                val currentActiveName = prefs.getString(KEY_ACTIVE_FILE, FILE_SLOT_A) ?: FILE_SLOT_A
-                val nextFileName = if (currentActiveName == FILE_SLOT_A) FILE_SLOT_B else FILE_SLOT_A
-                val finalFile = File(context.filesDir, nextFileName)
+                    val totalBytes = body.contentLength()
+                    var downloadedBytes = 0L
 
-                if (tempFile.exists()) tempFile.delete()
+                    val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                    val rawActive = prefs.getString(KEY_ACTIVE_FILE, FILE_SLOT_A)
+                    val currentActiveName = if (rawActive == FILE_SLOT_B) FILE_SLOT_B else FILE_SLOT_A
+                    val nextFileName = if (currentActiveName == FILE_SLOT_A) FILE_SLOT_B else FILE_SLOT_A
+                    val finalFile = File(context.filesDir, nextFileName)
 
-                body.byteStream().use { inputStream ->
-                    FileOutputStream(tempFile).use { outputStream ->
-                        val buffer = ByteArray(8 * 1024)
-                        var bytesRead: Int
-                        var lastEmittedProgress = 0
+                    body.byteStream().use { inputStream ->
+                        FileOutputStream(createdTemp).use { outputStream ->
+                            val buffer = ByteArray(8 * 1024)
+                            var bytesRead: Int
+                            var lastEmittedProgress = 0
 
-                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                            outputStream.write(buffer, 0, bytesRead)
-                            downloadedBytes += bytesRead
+                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                outputStream.write(buffer, 0, bytesRead)
+                                downloadedBytes += bytesRead
 
-                            if (totalBytes > 0L) {
-                                val currentProgress = ((downloadedBytes * 100L) / totalBytes)
-                                    .toInt()
-                                    .coerceIn(0, 100)
-                                if (currentProgress != lastEmittedProgress) {
-                                    lastEmittedProgress = currentProgress
-                                    emit(LiveDownloadState.Downloading(currentProgress))
+                                if (totalBytes > 0L) {
+                                    val currentProgress = ((downloadedBytes * 100L) / totalBytes)
+                                        .toInt()
+                                        .coerceIn(0, 100)
+                                    if (currentProgress != lastEmittedProgress) {
+                                        lastEmittedProgress = currentProgress
+                                        emit(LiveDownloadState.Downloading(currentProgress))
+                                    }
                                 }
                             }
+                            outputStream.flush()
                         }
-                        outputStream.flush()
                     }
+
+                    if (finalFile.exists()) finalFile.delete()
+                    if (!createdTemp.renameTo(finalFile)) {
+                        createdTemp.copyTo(finalFile, overwrite = true)
+                    }
+
+                    // Commit synchronously before broadcasting reload so WallpaperService reads the new slot.
+                    prefs.edit().putString(KEY_ACTIVE_FILE, nextFileName).commit()
+
+                    context.sendBroadcast(
+                        Intent(ACTION_RELOAD_WALLPAPER).setPackage(context.packageName),
+                    )
+
+                    val oldSlotFile = File(context.filesDir, currentActiveName)
+                    if (oldSlotFile.exists() && oldSlotFile.name != finalFile.name) {
+                        oldSlotFile.delete()
+                    }
+                    val legacyFile = File(context.filesDir, "active_live_wallpaper.mp4")
+                    if (legacyFile.exists() && legacyFile.name != finalFile.name) {
+                        legacyFile.delete()
+                    }
+
+                    emit(LiveDownloadState.Success(finalFile))
                 }
-
-                if (finalFile.exists()) finalFile.delete()
-                if (!tempFile.renameTo(finalFile)) {
-                    tempFile.copyTo(finalFile, overwrite = true)
-                    tempFile.delete()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emit(LiveDownloadState.Error(e.localizedMessage ?: "Network error while downloading video"))
+            } finally {
+                tempFile?.let { file ->
+                    if (file.exists()) file.delete()
                 }
-
-                prefs.edit().putString(KEY_ACTIVE_FILE, nextFileName).apply()
-
-                val oldSlotFile = File(context.filesDir, currentActiveName)
-                if (oldSlotFile.exists() && oldSlotFile.name != finalFile.name) {
-                    oldSlotFile.delete()
-                }
-                val legacyFile = File(context.filesDir, "active_live_wallpaper.mp4")
-                if (legacyFile.exists() && legacyFile.name != finalFile.name) {
-                    legacyFile.delete()
-                }
-
-                context.sendBroadcast(
-                    Intent(ACTION_RELOAD_WALLPAPER).setPackage(context.packageName),
-                )
-
-                emit(LiveDownloadState.Success(finalFile))
             }
-        } catch (e: Exception) {
-            if (tempFile.exists()) tempFile.delete()
-            emit(LiveDownloadState.Error(e.localizedMessage ?: "Lỗi kết nối mạng khi tải video"))
         }
     }.flowOn(Dispatchers.IO)
 
@@ -241,3 +295,5 @@ class MediaDownloadManager(
         result
     }
 }
+
+

@@ -1,5 +1,6 @@
 package com.example.di
 
+
 import android.content.Context
 import coil.ImageLoader
 import coil.decode.VideoFrameDecoder
@@ -14,24 +15,29 @@ import com.example.data.repository.WallpaperRepository
 import com.example.util.BitmapCropper
 import com.example.util.MediaDownloadManager
 
+
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
+
 
     val database: KuroWallDatabase by lazy {
         KuroWallDatabase.build(appContext)
     }
 
+
     val settingsDataStore: SettingsDataStore by lazy {
         SettingsDataStore(appContext)
     }
+
 
     val liveWallpaperDataSource: LiveWallpaperDataSource by lazy {
         LiveWallpaperDataSource(appContext)
     }
 
+
     val imageLoader: ImageLoader by lazy {
         ImageLoader.Builder(appContext)
-            .okHttpClient { NetworkModule.okHttpClient }
+            .okHttpClient { NetworkModule.mediaOkHttpClient }
             .components {
                 add(VideoFrameDecoder.Factory())
             }
@@ -54,6 +60,7 @@ class AppContainer(context: Context) {
             .build()
     }
 
+
     val wallpaperRepository: WallpaperRepository by lazy {
         WallpaperRepository(
             wallhavenApi = NetworkModule.wallhavenService,
@@ -63,6 +70,7 @@ class AppContainer(context: Context) {
         )
     }
 
+
     val bitmapCropper: BitmapCropper by lazy {
         BitmapCropper(
             context = appContext,
@@ -70,18 +78,25 @@ class AppContainer(context: Context) {
         )
     }
 
+
     val mediaDownloadManager: MediaDownloadManager by lazy {
         MediaDownloadManager(
             context = appContext,
-            okHttpClient = NetworkModule.okHttpClient,
+            mediaOkHttpClient = NetworkModule.mediaOkHttpClient,
         )
     }
+
 
     val interstitialAdManager: InterstitialAdManager by lazy {
         InterstitialAdManager(appContext = appContext)
     }
 
+
     val nativeAdManager: com.example.ads.NativeAdManager by lazy {
         com.example.ads.NativeAdManager(appContext = appContext)
     }
 }
+
+
+
+

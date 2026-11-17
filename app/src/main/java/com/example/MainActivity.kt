@@ -1,9 +1,13 @@
 package com.example
 
-import com.kuroanimelivewallpapers.app.R
+
+import android.content.ActivityNotFoundException
 import android.content.ComponentName
+import android.content.Intent
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
+import com.kuroanimelivewallpapers.app.R
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -105,6 +109,7 @@ import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.ObsidianVoid
 import com.example.util.LiveWallpaperHelper
 
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -120,12 +125,14 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+
 private data class TopLevelDestination(
     val route: Any,
     val labelRes: Int,
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector,
 )
+
 
 @Composable
 private fun KuroWallAppRoot(
@@ -144,6 +151,7 @@ private fun KuroWallAppRoot(
         (context.applicationContext as KuroWallApplication).container.nativeAdManager
     }
 
+
     val homeState by viewModel.homeState.collectAsStateWithLifecycle()
     val categories by viewModel.filteredCategories.collectAsStateWithLifecycle()
     val categoryFilterText by viewModel.categoryFilterText.collectAsStateWithLifecycle()
@@ -151,8 +159,10 @@ private fun KuroWallAppRoot(
     val favoriteIds by viewModel.favoriteIds.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
+
     var pendingLiveWallpaperComponent by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingLiveWallpaperTarget by rememberSaveable { mutableStateOf(WallpaperTarget.BOTH.name) }
+
 
     val liveWallpaperLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -173,6 +183,7 @@ private fun KuroWallAppRoot(
         }
     }
 
+
     fun launchAlternatingLiveWallpaperPicker(target: WallpaperTarget = WallpaperTarget.BOTH) {
         val targetComponent = LiveWallpaperHelper.getNextLiveWallpaperComponent(context)
         pendingLiveWallpaperComponent = targetComponent.flattenToString()
@@ -190,16 +201,19 @@ private fun KuroWallAppRoot(
         }
     }
 
+
     LaunchedEffect(interstitialAdManager, nativeAdManager) {
         interstitialAdManager.preload(context)
         nativeAdManager.preloadBuffer()
     }
+
 
     DisposableEffect(nativeAdManager) {
         onDispose {
             nativeAdManager.clearBuffer()
         }
     }
+
 
     LaunchedEffect(interstitialAdManager) {
         viewModel.events.collect { event ->
@@ -211,12 +225,48 @@ private fun KuroWallAppRoot(
                 is UiEvent.LaunchLiveWallpaperChooser -> {
                     launchAlternatingLiveWallpaperPicker(event.target)
                 }
+                is UiEvent.LaunchWallpaperRequestEmail -> {
+                    val subject = "Kuro Wallpaper Request"
+                    val body = buildString {
+                        if (event.userEmail.isNotBlank()) {
+                            append("From: ").append(event.userEmail).append("\n\n")
+                        }
+                        append("Wallpaper Request:\n").append(event.content)
+                    }
+                    val mailtoUri = Uri.parse(
+                        "mailto:${Uri.encode(event.targetEmail)}" +
+                                "?subject=${Uri.encode(subject)}" +
+                                "&body=${Uri.encode(body)}",
+                    )
+                    val emailIntent = Intent(Intent.ACTION_SENDTO, mailtoUri).apply {
+                        putExtra(Intent.EXTRA_EMAIL, arrayOf(event.targetEmail))
+                        putExtra(Intent.EXTRA_SUBJECT, subject)
+                        putExtra(Intent.EXTRA_TEXT, body)
+                        if (activity == null) {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    }
+                    try {
+                        (activity ?: context).startActivity(emailIntent)
+                    } catch (_: ActivityNotFoundException) {
+                        snackbarHostState.showSnackbar(
+                            message = "No email app installed. Please send requests to ${event.targetEmail}.",
+                            duration = SnackbarDuration.Long,
+                        )
+                    } catch (_: Exception) {
+                        snackbarHostState.showSnackbar(
+                            message = "Unable to open email client. Contact ${event.targetEmail}.",
+                            duration = SnackbarDuration.Long,
+                        )
+                    }
+                }
                 UiEvent.WallpaperApplied -> {
                     interstitialAdManager.markWallpaperApplied()
                 }
             }
         }
     }
+
 
     val topDestinations = remember {
         listOf(
@@ -227,8 +277,10 @@ private fun KuroWallAppRoot(
         )
     }
 
+
     val isFullScreenRoute = currentDestination?.hasRoute<SplashRoute>() == true ||
             currentDestination?.hasRoute<DetailRoute>() == true
+
 
     fun navigateTopLevel(route: Any) {
         navController.navigate(route) {
@@ -240,8 +292,10 @@ private fun KuroWallAppRoot(
         }
     }
 
+
     val configuration = LocalConfiguration.current
     val useNavigationRail = configuration.screenWidthDp >= 600 && !isFullScreenRoute
+
 
     Box(
         modifier = Modifier
@@ -312,6 +366,7 @@ private fun KuroWallAppRoot(
                             }
                         }
 
+
                         AdaptiveBannerAd(
                             adUnitId = AdMobConstants.TEST_ADAPTIVE_BANNER_UNIT_ID,
                             topSafeMargin = 10.dp,
@@ -353,6 +408,7 @@ private fun KuroWallAppRoot(
                     }
                 }
 
+
                 Column(modifier = Modifier.weight(1f).fillMaxSize()) {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         NavHost(
@@ -379,6 +435,7 @@ private fun KuroWallAppRoot(
                                     },
                                 )
                             }
+
 
                             composable<HomeRoute>(
                                 enterTransition = {
@@ -414,6 +471,7 @@ private fun KuroWallAppRoot(
                                 )
                             }
 
+
                             composable<CategoriesRoute> {
                                 CategoriesScreen(
                                     categories = categories,
@@ -426,6 +484,7 @@ private fun KuroWallAppRoot(
                                     nativeAdManager = nativeAdManager,
                                 )
                             }
+
 
                             composable<FavoritesRoute> {
                                 FavoritesScreen(
@@ -442,6 +501,7 @@ private fun KuroWallAppRoot(
                                     onExploreClick = { navigateTopLevel(HomeRoute) },
                                 )
                             }
+
 
                             composable<SettingsRoute> {
                                 SettingsScreen(
@@ -464,6 +524,7 @@ private fun KuroWallAppRoot(
                                     onSubmitWallpaperRequest = viewModel::submitWallpaperRequest,
                                 )
                             }
+
 
                             composable<DetailRoute>(
                                 enterTransition = {
