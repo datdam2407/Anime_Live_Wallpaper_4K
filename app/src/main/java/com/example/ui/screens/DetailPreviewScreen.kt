@@ -1,8 +1,6 @@
 package com.example.ui.screens
 
 
-
-
 import android.content.Context
 import android.os.Build
 import android.util.DisplayMetrics
@@ -136,8 +134,6 @@ import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 
 
-
-
 @Composable
 fun DetailPreviewScreen(
     wallpapers: List<AppWallpaper>,
@@ -158,8 +154,6 @@ fun DetailPreviewScreen(
     val coroutineScope = rememberCoroutineScope()
 
 
-
-
     if (wallpapers.isEmpty()) {
         Box(
             modifier = Modifier
@@ -175,8 +169,6 @@ fun DetailPreviewScreen(
         }
         return
     }
-
-
 
 
     val pagerEntries = remember(wallpapers) {
@@ -196,8 +188,6 @@ fun DetailPreviewScreen(
     var showTargetDialog by remember { mutableStateOf(false) }
 
 
-
-
     BackHandler {
         when {
             appliedSuccessTarget != null -> onDismissAppliedSuccess()
@@ -206,8 +196,6 @@ fun DetailPreviewScreen(
             else -> onBack()
         }
     }
-
-
 
 
     val context = LocalContext.current
@@ -220,12 +208,8 @@ fun DetailPreviewScreen(
     }
 
 
-
-
     val currentPage by remember(pagerState) { derivedStateOf { pagerState.currentPage } }
     val settledPage by remember(pagerState) { derivedStateOf { pagerState.settledPage } }
-
-
 
 
     LaunchedEffect(settledPage, pagerEntries) {
@@ -236,8 +220,6 @@ fun DetailPreviewScreen(
         } else {
             isFullScreen = false
         }
-
-
 
 
         // Pre-warm neighbor pages
@@ -272,13 +254,9 @@ fun DetailPreviewScreen(
     }
 
 
-
-
     val currentEntry = pagerEntries.getOrNull(currentPage)
     val currentWallpaperPage = currentEntry as? DetailPagerEntry.WallpaperPage
     val currentWallpaper = currentWallpaperPage?.wallpaper
-
-
 
 
     // ĐIỀU KIỆN ẨN DIALOG MP4: Bắt buộc currentWallpaper.isLive phải bằng True!
@@ -293,13 +271,9 @@ fun DetailPreviewScreen(
     }
 
 
-
-
     fun triggerSetWallpaper(wallpaper: AppWallpaper) {
         // Vẫn chặn nếu đang processing ngầm để tránh người dùng nhấn 2-3 lần liên tiếp gây crash
         if (isProcessing) return
-
-
 
 
         if (wallpaper.isLive) {
@@ -308,8 +282,6 @@ fun DetailPreviewScreen(
             showTargetDialog = true // Mở dialog 3 options của mình
         }
     }
-
-
 
 
     Box(
@@ -386,8 +358,6 @@ fun DetailPreviewScreen(
                     }
 
 
-
-
                     val isCurrentLive = currentWallpaperPage?.wallpaper?.isLive == true
                     Surface(
                         color = if (isCurrentLive) {
@@ -403,7 +373,7 @@ fun DetailPreviewScreen(
                         },
                     ) {
                         val badgeLabel = if (currentWallpaperPage != null) {
-                            "${currentWallpaperPage.wallpaper.resolutionLabel} • currentWallpaperPage.wallpaperIndex+1/{wallpapers.size}"
+                            "${currentWallpaperPage.wallpaper.resolutionLabel} • ${currentWallpaperPage.wallpaperIndex + 1}/${wallpapers.size}"
                         } else {
                             "Sponsored • Ad"
                         }
@@ -433,8 +403,6 @@ fun DetailPreviewScreen(
                     }
 
 
-
-
                     if (currentWallpaper != null) {
                         IconButton(
                             onClick = { isFullScreen = true },
@@ -454,8 +422,6 @@ fun DetailPreviewScreen(
                         Spacer(modifier = Modifier.size(48.dp))
                     }
                 }
-
-
 
 
                 HorizontalPager(
@@ -481,8 +447,6 @@ fun DetailPreviewScreen(
                     }
 
 
-
-
                     val cardTransformModifier = Modifier
                         .fillMaxSize()
                         .padding(vertical = 6.dp)
@@ -495,8 +459,6 @@ fun DetailPreviewScreen(
                             scaleY = cardScale
                             alpha = lerp(1f, 0.68f, pageOffset)
                         }
-
-
 
 
                     when (entry) {
@@ -533,8 +495,6 @@ fun DetailPreviewScreen(
                         }
 
 
-
-
                         is DetailPagerEntry.NativeAdPage -> {
                             NativeAdCard(
                                 style = NativeAdStyle.FULL_PAGER,
@@ -544,8 +504,6 @@ fun DetailPreviewScreen(
                         }
                     }
                 }
-
-
 
 
                 if (currentWallpaper != null) {
@@ -593,8 +551,6 @@ fun DetailPreviewScreen(
         }
 
 
-
-
         AnimatedVisibility(
             visible = isProcessing,
             enter = fadeIn(),
@@ -605,8 +561,6 @@ fun DetailPreviewScreen(
                 progress = liveDownloadProgress,
             )
         }
-
-
 
 
         AnimatedVisibility(
@@ -621,8 +575,6 @@ fun DetailPreviewScreen(
         }
     }
 }
-
-
 
 
 @Composable
@@ -677,11 +629,7 @@ private fun WallpaperAppliedSuccessPopup(
                 )
 
 
-
-
                 Spacer(modifier = Modifier.height(14.dp))
-
-
 
 
                 Text(
@@ -689,8 +637,6 @@ private fun WallpaperAppliedSuccessPopup(
                     style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
                     color = InkWhite.copy(alpha = 0.95f),
                 )
-
-
 
 
                 if (targetLabel.isNotBlank()) {
@@ -703,11 +649,7 @@ private fun WallpaperAppliedSuccessPopup(
                 }
 
 
-
-
                 Spacer(modifier = Modifier.height(24.dp))
-
-
 
 
                 Button(
@@ -731,8 +673,6 @@ private fun WallpaperAppliedSuccessPopup(
         }
     }
 }
-
-
 
 
 @Composable
@@ -799,7 +739,6 @@ private fun WallpaperProcessingOverlay(
                     }
                 }
 
-
                 if (progress != null) {
                     LinearProgressIndicator(
                         progress = { progress.coerceIn(0, 100) / 100f },
@@ -823,7 +762,6 @@ private fun WallpaperProcessingOverlay(
                     )
                 }
 
-
                 Text(
                     text = label,
                     style = MaterialTheme.typography.bodySmall,
@@ -833,8 +771,6 @@ private fun WallpaperProcessingOverlay(
         }
     }
 }
-
-
 
 
 @Composable
@@ -854,7 +790,6 @@ private fun CarouselWallpaperCard(
         mutableStateOf(false)
     }
     val isApplyEnabled = isActive && isMediaReady && !isProcessing
-
 
     Surface(
         shape = cardShape,
@@ -877,7 +812,6 @@ private fun CarouselWallpaperCard(
                 modifier = Modifier.fillMaxSize(),
             )
 
-
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -889,7 +823,6 @@ private fun CarouselWallpaperCard(
                         ),
                     ),
             )
-
 
             IconButton(
                 onClick = onToggleFavoriteClick,
@@ -914,7 +847,6 @@ private fun CarouselWallpaperCard(
                     modifier = Modifier.size(24.dp),
                 )
             }
-
 
             Button(
                 onClick = onSetWallpaperClick,
@@ -978,8 +910,6 @@ private fun CarouselWallpaperCard(
 }
 
 
-
-
 @Composable
 private fun WallpaperMediaContent(
     item: AppWallpaper,
@@ -1003,17 +933,14 @@ private fun WallpaperMediaContent(
         var isHighResLoading by remember(item.id, item.imageUrl) { mutableStateOf(true) }
         val latestOnMediaReadyChanged by rememberUpdatedState(onMediaReadyChanged)
 
-
         LaunchedEffect(item.id, item.imageUrl) {
             isHighResLoading = true
             latestOnMediaReadyChanged(false)
         }
 
-
         BoxWithConstraints(modifier = modifier) {
             val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(480, 1440) }
             val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(640, 2560) }
-
 
             val thumbRequest = remember(item.thumbnailUrl, targetWidthPx, targetHeightPx) {
                 ImageRequest.Builder(context)
@@ -1038,7 +965,6 @@ private fun WallpaperMediaContent(
                     .crossfade(160)
                     .build()
             }
-
 
             val thumbPainter = rememberAsyncImagePainter(
                 model = thumbRequest,
@@ -1078,8 +1004,6 @@ private fun WallpaperMediaContent(
 }
 
 
-
-
 @OptIn(UnstableApi::class)
 @Composable
 private fun LiveMp4FullScreenPlayer(
@@ -1099,7 +1023,6 @@ private fun LiveMp4FullScreenPlayer(
     }
     var isVideoReady by remember(videoUrl) { mutableStateOf(false) }
 
-
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -1114,9 +1037,7 @@ private fun LiveMp4FullScreenPlayer(
         }
     }
 
-
     val shouldPlay = isActive && isHostStarted
-
 
     LaunchedEffect(shouldPlay, videoUrl) {
         if (!shouldPlay) {
@@ -1124,7 +1045,6 @@ private fun LiveMp4FullScreenPlayer(
             latestOnVideoReadyChanged(false)
         }
     }
-
 
     BoxWithConstraints(modifier = modifier) {
         val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(360, 1080) }
@@ -1141,14 +1061,12 @@ private fun LiveMp4FullScreenPlayer(
                 .build()
         }
 
-
         AsyncImage(
             model = thumbRequest,
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
-
 
         if (shouldPlay) {
             ActiveExoPlayerOverlay(
@@ -1174,8 +1092,6 @@ private fun LiveMp4FullScreenPlayer(
 }
 
 
-
-
 @OptIn(UnstableApi::class)
 @Composable
 private fun ActiveExoPlayerOverlay(
@@ -1190,7 +1106,6 @@ private fun ActiveExoPlayerOverlay(
     // MediaCodec TextureView output on emulators (EGL_emulation) or after a GL error.
     var useEffects by remember(videoUrl) { mutableStateOf(DelogoEffect.isSupportedOnDevice()) }
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
-
 
     val screenBounds = remember(context) {
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
@@ -1208,7 +1123,6 @@ private fun ActiveExoPlayerOverlay(
         }
     }
 
-
     val player = remember(videoUrl, useEffects) {
         val renderersFactory = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
         val loadControl = DefaultLoadControl.Builder()
@@ -1219,7 +1133,6 @@ private fun ActiveExoPlayerOverlay(
             .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, muted)
             .setMaxVideoSize(screenBounds.first, screenBounds.second)
             .build()
-
 
         ExoPlayer.Builder(context, renderersFactory)
             .setLoadControl(loadControl)
@@ -1248,7 +1161,6 @@ private fun ActiveExoPlayerOverlay(
             }
     }
 
-
     DisposableEffect(player, muted) {
         player.volume = if (muted) 0f else 1f
         player.trackSelectionParameters = TrackSelectionParameters.Builder(context)
@@ -1260,7 +1172,6 @@ private fun ActiveExoPlayerOverlay(
         }
     }
 
-
     DisposableEffect(player) {
         val readinessListener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -1269,13 +1180,11 @@ private fun ActiveExoPlayerOverlay(
                 )
             }
 
-
             override fun onRenderedFirstFrame() {
                 if (player.playbackState == Player.STATE_READY && player.playerError == null) {
                     latestOnReadyChanged(true)
                 }
             }
-
 
             override fun onPlayerError(error: PlaybackException) {
                 latestOnReadyChanged(false)
@@ -1285,7 +1194,6 @@ private fun ActiveExoPlayerOverlay(
             player.playbackState == Player.STATE_READY && player.playerError == null,
         )
         player.addListener(readinessListener)
-
 
         onDispose {
             latestOnReadyChanged(false)
@@ -1300,7 +1208,6 @@ private fun ActiveExoPlayerOverlay(
             player.release()
         }
     }
-
 
     AndroidView(
         factory = { ctx ->
@@ -1329,8 +1236,6 @@ private fun ActiveExoPlayerOverlay(
         modifier = modifier,
     )
 }
-
-
 
 
 @Composable
@@ -1380,8 +1285,6 @@ private fun WallpaperTargetDialog(
 }
 
 
-
-
 @Composable
 private fun TargetOptionRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -1414,3 +1317,6 @@ private fun TargetOptionRow(
         }
     }
 }
+
+
+

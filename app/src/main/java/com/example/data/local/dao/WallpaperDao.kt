@@ -28,7 +28,19 @@ interface WallpaperDao {
     suspend fun deleteFavoriteById(id: String)
 
     @Query("SELECT * FROM cached_wallpapers WHERE cacheKey = :cacheKey ORDER BY positionIndex ASC")
+    fun observeCachedWallpapers(cacheKey: String): Flow<List<CachedWallpaperEntity>>
+
+    @Query("SELECT * FROM cached_wallpapers WHERE category = :category ORDER BY cachedAt DESC, positionIndex ASC")
+    fun observeCachedWallpapersByCategory(category: String): Flow<List<CachedWallpaperEntity>>
+
+    @Query("SELECT * FROM cached_wallpapers WHERE cacheKey = :cacheKey ORDER BY positionIndex ASC")
     suspend fun getCachedWallpapers(cacheKey: String): List<CachedWallpaperEntity>
+
+    @Query("SELECT * FROM cached_wallpapers WHERE category = :category ORDER BY cachedAt DESC, positionIndex ASC")
+    suspend fun getCachedWallpapersByCategorySync(category: String): List<CachedWallpaperEntity>
+
+    @Query("SELECT * FROM query_cache_meta WHERE cacheKey = :cacheKey")
+    suspend fun getCacheMeta(cacheKey: String): QueryCacheMetaEntity?
 
     @Query("SELECT fetchedAtMillis FROM query_cache_meta WHERE cacheKey = :cacheKey")
     suspend fun getCacheTimestamp(cacheKey: String): Long?
@@ -45,15 +57,36 @@ interface WallpaperDao {
     @Query("DELETE FROM cached_wallpapers WHERE cacheKey = :cacheKey")
     suspend fun deleteCacheForKey(cacheKey: String)
 
+    @Query("DELETE FROM cached_wallpapers WHERE category = :category")
+    suspend fun deleteCacheByCategory(category: String)
+
+    @Query("DELETE FROM query_cache_meta WHERE category = :category")
+    suspend fun deleteCacheMetaByCategory(category: String)
+
+    @Transaction
+    suspend fun clearCategoryCache(category: String) {
+        deleteCacheByCategory(category)
+        deleteCacheMetaByCategory(category)
+    }
+
     @Transaction
     suspend fun replaceCacheForKey(
         cacheKey: String,
         items: List<CachedWallpaperEntity>,
         timestampMillis: Long,
+        category: String = items.firstOrNull()?.category.orEmpty(),
+        expiresAtMillis: Long = 0L,
     ) {
         deleteCacheForKey(cacheKey)
         insertCachedWallpapers(items)
-        insertCacheMeta(QueryCacheMetaEntity(cacheKey, timestampMillis))
+        insertCacheMeta(
+            QueryCacheMetaEntity(
+                cacheKey = cacheKey,
+                fetchedAtMillis = timestampMillis,
+                category = category,
+                expiresAtMillis = expiresAtMillis,
+            ),
+        )
     }
 
     @Query("DELETE FROM cached_wallpapers")

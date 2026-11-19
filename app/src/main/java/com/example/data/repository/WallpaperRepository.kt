@@ -1,6 +1,7 @@
 package com.example.data.repository
 
 import android.util.Log
+import com.example.data.local.CacheExpiryPolicy
 import com.example.data.local.LiveWallpaperDataSource
 import com.example.data.local.dao.WallpaperDao
 import com.example.data.local.entity.CachedWallpaperEntity
@@ -27,6 +28,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -58,12 +61,11 @@ class WallpaperRepository(
     private val wallpaperDao: WallpaperDao,
     private val liveWallpaperDataSource: LiveWallpaperDataSource = LiveWallpaperDataSource { "[]" },
     private val wallhavenRateLimiter: WallhavenRateLimiter = WallhavenRateLimiter(),
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
     companion object {
         private const val TAG = "WallpaperRepository"
         const val HOME_TRENDING_KEY = "Home_Trending"
-        private const val CACHE_TTL_MILLIS = 24L * 60L * 60L * 1000L // 24-hour Room cache
-        private const val FORCE_REFRESH_MIN_INTERVAL_MS = 8_000L
     }
 
     // Repository-owned scope decouples shared in-flight requests from individual caller cancellation.
@@ -129,9 +131,18 @@ class WallpaperRepository(
         wallpaperDao.clearAllCache()
     }
 
-    suspend fun pruneExpiredCache(nowMillis: Long = System.currentTimeMillis()) = withContext(Dispatchers.IO) {
+    suspend fun clearCategoryCache(
+        query: String,
+        sort: SortOption,
+        isLive: Boolean = false,
+    ) = withContext(Dispatchers.IO) {
+        val category = CacheExpiryPolicy.resolveCategory(query = query, sort = sort, isLive = isLive)
+        wallpaperDao.clearCategoryCache(category)
+    }
+
+    suspend fun pruneExpiredCache(nowMillis: Long = clock()) = withContext(Dispatchers.IO) {
         try {
-            val cutoffMillis = nowMillis - CACHE_TTL_MILLIS
+            val cutoffMillis = nowMillis - CacheExpiryPolicy.MAX_RETENTION_MILLIS
             wallpaperDao.pruneExpiredCache(cutoffMillis)
         } catch (e: CancellationException) {
             throw e
@@ -139,6 +150,122 @@ class WallpaperRepository(
             runCatching { Log.w(TAG, "Failed to prune expired cache: ${e.message}", e) }
         }
     }
+
+    /**
+     * Reactive Offline-First stream backed directly by Room SQLite.
+     * Emits cached wallpapers immediately and updates automatically whenever a refresh writes to Room.
+     */
+    fun observeCachedWallpapers(
+        query: String,
+        isLive: Boolean,
+        filter: WallpaperFilter,
+        page: Int = 1,
+    ): Flow<List<AppWallpaper>> {
+        val normalizedQuery = query.trim().ifEmpty { HOME_TRENDING_KEY }
+        if (!isLive && normalizedQuery == HOME_TRENDING_KEY) {
+            val (batchTopics, topicPage) = resolveTrendingBatch(page) ?: return flowOf(emptyList())
+            val topicFlows = batchTopics.map { topic ->
+                val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
+                wallpaperDao.observeCachedWallpapers(topicCacheKey).map { list -> list.map { it.toDomain() } }
+            }
+            return combine(topicFlows) { lists ->
+                interleaveSeriesWallpapers(lists.toList())
+            }
+        }
+        val cacheKey = buildCacheKey(normalizedQuery, isLive, filter, page)
+        return wallpaperDao.observeCachedWallpapers(cacheKey).map { list -> list.map { it.toDomain() } }
+    }
+
+    /**
+     * Instant local-only Room snapshot (0 network calls) so UI can render cached wallpapers
+     * immediately even when the cache is expired and refreshing in the background.
+     */
+    suspend fun getCachedWallpapersSnapshot(
+        query: String,
+        isLive: Boolean,
+        filter: WallpaperFilter,
+        page: Int = 1,
+    ): List<AppWallpaper> = withContext(Dispatchers.IO) {
+        val normalizedQuery = query.trim().ifEmpty { HOME_TRENDING_KEY }
+        if (isLive) {
+            val bundled = liveWallpaperDataSource.getLiveWallpapersPage(
+                query = normalizedQuery,
+                page = page,
+                pageSize = LiveWallpaperDataSource.DEFAULT_PAGE_SIZE,
+            )
+            if (bundled.items.isNotEmpty()) return@withContext bundled.items
+        }
+        if (!isLive && normalizedQuery == HOME_TRENDING_KEY) {
+            val (batchTopics, topicPage) = resolveTrendingBatch(page) ?: return@withContext emptyList()
+            val perTopicLists = batchTopics.map { topic ->
+                val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
+                wallpaperDao.getCachedWallpapers(topicCacheKey).map { it.toDomain() }
+            }
+            return@withContext interleaveSeriesWallpapers(perTopicLists)
+        }
+        val cacheKey = buildCacheKey(normalizedQuery, isLive, filter, page)
+        wallpaperDao.getCachedWallpapers(cacheKey).map { it.toDomain() }
+    }
+
+    /**
+     * Returns true if the local Room cache for this query/filter/page is populated and
+     * still within its CacheExpiryPolicy freshness window (4h–12h depending on category/sort).
+     */
+    suspend fun isFeedCacheFresh(
+        query: String,
+        isLive: Boolean,
+        filter: WallpaperFilter,
+        page: Int = 1,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val normalizedQuery = query.trim().ifEmpty { HOME_TRENDING_KEY }
+        if (isLive) {
+            val bundled = liveWallpaperDataSource.getLiveWallpapersPage(
+                query = normalizedQuery,
+                page = page,
+                pageSize = LiveWallpaperDataSource.DEFAULT_PAGE_SIZE,
+            )
+            if (bundled.items.isNotEmpty()) return@withContext true
+        }
+        if (!isLive && normalizedQuery == HOME_TRENDING_KEY) {
+            val (batchTopics, topicPage) = resolveTrendingBatch(page) ?: return@withContext false
+            return@withContext batchTopics.all { topic ->
+                val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
+                isCacheFreshAndEligible(
+                    cacheKey = topicCacheKey,
+                    query = topic.title,
+                    sort = filter.sort,
+                    isLive = false,
+                    forceRefresh = false,
+                ) && wallpaperDao.getCachedWallpapers(topicCacheKey).isNotEmpty()
+            }
+        }
+        val cacheKey = buildCacheKey(normalizedQuery, isLive, filter, page)
+        isCacheFreshAndEligible(
+            cacheKey = cacheKey,
+            query = normalizedQuery,
+            sort = filter.sort,
+            isLive = isLive,
+            forceRefresh = false,
+        ) && wallpaperDao.getCachedWallpapers(cacheKey).isNotEmpty()
+    }
+
+    /**
+     * Offline-First coordinator: returns Room cache immediately with 0 API requests while valid,
+     * or fetches fresh data from Wallhaven/Reddit when empty, expired, or force-refreshed.
+     */
+    suspend fun refreshWallpapersIfNeeded(
+        query: String,
+        isLive: Boolean,
+        filter: WallpaperFilter,
+        page: Int = 1,
+        forceRefresh: Boolean = false,
+    ): WallpaperFetchResult = getWallpapers(
+        query = query,
+        isLive = isLive,
+        filter = filter,
+        page = page,
+        forceRefresh = forceRefresh,
+    )
 
     suspend fun warmupLiveCatalog() = withContext(Dispatchers.IO) {
         liveWallpaperDataSource.getAllParsedItems()
@@ -179,6 +306,7 @@ class WallpaperRepository(
                 staleCache = cachedEntities,
                 filter = filter,
                 page = page,
+                forceRefresh = forceRefresh,
             )
         }
 
@@ -190,7 +318,14 @@ class WallpaperRepository(
             )
         }
 
-        if (isCacheFreshAndEligible(cacheKey, forceRefresh) && cachedEntities.isNotEmpty()) {
+        if (isCacheFreshAndEligible(
+                cacheKey = cacheKey,
+                query = normalizedQuery,
+                sort = filter.sort,
+                isLive = false,
+                forceRefresh = forceRefresh,
+            ) && cachedEntities.isNotEmpty()
+        ) {
             return@withContext WallpaperFetchResult(
                 wallpapers = cachedEntities.map { it.toDomain() },
                 isFromCache = true,
@@ -203,13 +338,48 @@ class WallpaperRepository(
 
     private suspend fun isCacheFreshAndEligible(
         cacheKey: String,
+        query: String,
+        sort: SortOption,
+        isLive: Boolean,
         forceRefresh: Boolean,
     ): Boolean {
-        val cachedTimestamp = wallpaperDao.getCacheTimestamp(cacheKey) ?: return false
-        val ageMillis = System.currentTimeMillis() - cachedTimestamp
-        val isCacheFresh = ageMillis < CACHE_TTL_MILLIS
-        val isRecentlyRefreshed = ageMillis < FORCE_REFRESH_MIN_INTERVAL_MS
+        val meta = wallpaperDao.getCacheMeta(cacheKey)
+        val cachedTimestamp = meta?.fetchedAtMillis ?: wallpaperDao.getCacheTimestamp(cacheKey) ?: return false
+        val expiresAtMillis = meta?.expiresAtMillis ?: 0L
+        val now = clock()
+        val ttlMillis = CacheExpiryPolicy.ttlMillisFor(query = query, sort = sort, isLive = isLive)
+        val isCacheFresh = CacheExpiryPolicy.isFresh(
+            fetchedAtMillis = cachedTimestamp,
+            expiresAtMillis = expiresAtMillis,
+            ttlMillis = ttlMillis,
+            nowMillis = now,
+        )
+        val isRecentlyRefreshed = CacheExpiryPolicy.isWithinForceRefreshCooldown(
+            fetchedAtMillis = cachedTimestamp,
+            nowMillis = now,
+        )
         return (!forceRefresh || isRecentlyRefreshed) && isCacheFresh
+    }
+
+    private fun resolveTrendingBatch(page: Int): Pair<List<com.example.domain.model.TrendingAnimeTopic>, Int>? {
+        val topics = AnimeCatalog.trendingTopics
+        if (topics.isEmpty()) return null
+        val queueBatches = listOf(
+            topics.slice(0 until minOf(3, topics.size)) to 1,
+            (if (topics.size > 3) topics.slice(3 until minOf(6, topics.size)) else emptyList()) to 1,
+            (if (topics.size > 6) topics.slice(6 until minOf(8, topics.size)) else emptyList()) to 1,
+            (if (topics.size > 8) topics.slice(8 until topics.size) else emptyList()) to 1,
+        ).filter { it.first.isNotEmpty() }
+
+        return if (page <= queueBatches.size) {
+            queueBatches[page - 1]
+        } else {
+            val overflowIndex = page - queueBatches.size - 1
+            val chunked = topics.chunked(3)
+            val roundTopics = chunked[overflowIndex % chunked.size]
+            val extraPage = 2 + (overflowIndex / chunked.size)
+            roundTopics to extraPage
+        }
     }
 
     /**
@@ -252,7 +422,14 @@ class WallpaperRepository(
             async {
                 val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
                 val topicCached = wallpaperDao.getCachedWallpapers(topicCacheKey)
-                val result = if (isCacheFreshAndEligible(topicCacheKey, forceRefresh) && topicCached.isNotEmpty()) {
+                val result = if (isCacheFreshAndEligible(
+                        cacheKey = topicCacheKey,
+                        query = topic.title,
+                        sort = filter.sort,
+                        isLive = false,
+                        forceRefresh = forceRefresh,
+                    ) && topicCached.isNotEmpty()
+                ) {
                     WallpaperFetchResult(
                         wallpapers = topicCached.map { it.toDomain() },
                         isFromCache = true,
@@ -557,10 +734,23 @@ class WallpaperRepository(
         val distinctItems = combined.distinctBy { it.id }.shuffled()
 
         if (distinctItems.isNotEmpty()) {
+            val now = clock()
+            val category = CacheExpiryPolicy.resolveCategory(
+                query = query,
+                sort = filter.sort,
+                isLive = false,
+            )
+            val ttlMillis = CacheExpiryPolicy.ttlMillisFor(
+                query = query,
+                sort = filter.sort,
+                isLive = false,
+            )
             wallpaperDao.replaceCacheForKey(
                 cacheKey = cacheKey,
-                items = distinctItems.mapIndexed { idx, w -> w.toCacheEntity(cacheKey, idx) },
-                timestampMillis = System.currentTimeMillis(),
+                items = distinctItems.mapIndexed { idx, w -> w.toCacheEntity(cacheKey, idx, category, now) },
+                timestampMillis = now,
+                category = category,
+                expiresAtMillis = now + ttlMillis,
             )
             val cooldownNote = if (retryAfterSec > 0L) " (${retryAfterSec}s cooldown)" else ""
             WallpaperFetchResult(
@@ -612,6 +802,7 @@ class WallpaperRepository(
         staleCache: List<CachedWallpaperEntity>,
         filter: WallpaperFilter,
         page: Int,
+        forceRefresh: Boolean = false,
     ): WallpaperFetchResult = coroutineScope {
         val livePage = liveWallpaperDataSource.getLiveWallpapersPage(
             query = query,
@@ -631,6 +822,21 @@ class WallpaperRepository(
             return@coroutineScope WallpaperFetchResult(
                 wallpapers = emptyList(),
                 isFromCache = false,
+                hasMore = false,
+            )
+        }
+
+        if (isCacheFreshAndEligible(
+                cacheKey = cacheKey,
+                query = query,
+                sort = filter.sort,
+                isLive = true,
+                forceRefresh = forceRefresh,
+            ) && staleCache.isNotEmpty()
+        ) {
+            return@coroutineScope WallpaperFetchResult(
+                wallpapers = staleCache.map { it.toDomain() },
+                isFromCache = true,
                 hasMore = false,
             )
         }
@@ -728,10 +934,23 @@ class WallpaperRepository(
 
         val distinctLive = liveWallpapers.distinctBy { it.id }.shuffled()
         if (distinctLive.isNotEmpty()) {
+            val now = clock()
+            val category = CacheExpiryPolicy.resolveCategory(
+                query = query,
+                sort = filter.sort,
+                isLive = true,
+            )
+            val ttlMillis = CacheExpiryPolicy.ttlMillisFor(
+                query = query,
+                sort = filter.sort,
+                isLive = true,
+            )
             wallpaperDao.replaceCacheForKey(
                 cacheKey = cacheKey,
-                items = distinctLive.mapIndexed { idx, w -> w.toCacheEntity(cacheKey, idx) },
-                timestampMillis = System.currentTimeMillis(),
+                items = distinctLive.mapIndexed { idx, w -> w.toCacheEntity(cacheKey, idx, category, now) },
+                timestampMillis = now,
+                category = category,
+                expiresAtMillis = now + ttlMillis,
             )
             WallpaperFetchResult(wallpapers = distinctLive, isFromCache = false, hasMore = false)
         } else if (staleCache.isNotEmpty()) {
@@ -871,7 +1090,12 @@ class WallpaperRepository(
         source = source,
     )
 
-    private fun AppWallpaper.toCacheEntity(cacheKey: String, index: Int): CachedWallpaperEntity =
+    private fun AppWallpaper.toCacheEntity(
+        cacheKey: String,
+        index: Int,
+        category: String,
+        cachedAt: Long,
+    ): CachedWallpaperEntity =
         CachedWallpaperEntity(
             cacheKey = cacheKey,
             wallpaperId = id,
@@ -885,5 +1109,7 @@ class WallpaperRepository(
             height = height,
             source = source,
             positionIndex = index,
+            category = category,
+            cachedAt = cachedAt,
         )
 }

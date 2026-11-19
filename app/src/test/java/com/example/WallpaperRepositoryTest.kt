@@ -1,5 +1,6 @@
 package com.example
 
+import com.example.data.local.CacheExpiryPolicy
 import com.example.data.local.LiveWallpaperDataSource
 import com.example.data.local.dao.WallpaperDao
 import com.example.data.local.entity.CachedWallpaperEntity
@@ -19,12 +20,16 @@ import com.example.data.remote.WallhavenService
 import com.example.data.remote.WallhavenThumbs
 import com.example.data.repository.WallpaperRepository
 import com.example.domain.model.ResolutionTier
+import com.example.domain.model.SortOption
 import com.example.domain.model.WallpaperFilter
 import java.io.File
+import java.io.IOException
 import java.util.Collections
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.runTest
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -39,8 +44,8 @@ class WallpaperRepositoryTest {
 
     private class FakeWallpaperDao : WallpaperDao {
         private val favorites = MutableStateFlow<List<FavoriteWallpaperEntity>>(emptyList())
-        private val cache = mutableMapOf<String, List<CachedWallpaperEntity>>()
-        private val meta = mutableMapOf<String, Long>()
+        private val cacheFlow = MutableStateFlow<Map<String, List<CachedWallpaperEntity>>>(emptyMap())
+        private val meta = mutableMapOf<String, QueryCacheMetaEntity>()
 
         override fun observeFavorites(): Flow<List<FavoriteWallpaperEntity>> = favorites
         override fun observeFavoriteIds(): Flow<List<String>> = favorites.map { list -> list.map { it.id } }
@@ -51,32 +56,54 @@ class WallpaperRepositoryTest {
         override suspend fun deleteFavoriteById(id: String) {
             favorites.value = favorites.value.filterNot { it.id == id }
         }
+        override fun observeCachedWallpapers(cacheKey: String): Flow<List<CachedWallpaperEntity>> =
+            cacheFlow.map { map -> map[cacheKey].orEmpty() }
+        override fun observeCachedWallpapersByCategory(category: String): Flow<List<CachedWallpaperEntity>> =
+            cacheFlow.map { map ->
+                map.values.flatten()
+                    .filter { it.category == category }
+                    .sortedWith(compareByDescending<CachedWallpaperEntity> { it.cachedAt }.thenBy { it.positionIndex })
+            }
         override suspend fun getCachedWallpapers(cacheKey: String): List<CachedWallpaperEntity> =
-            cache[cacheKey].orEmpty()
-        override suspend fun getCacheTimestamp(cacheKey: String): Long? = meta[cacheKey]
-        override fun observeCacheCount(): Flow<Int> = MutableStateFlow(cache.values.sumOf { it.size })
+            cacheFlow.value[cacheKey].orEmpty()
+        override suspend fun getCachedWallpapersByCategorySync(category: String): List<CachedWallpaperEntity> =
+            cacheFlow.value.values.flatten()
+                .filter { it.category == category }
+                .sortedWith(compareByDescending<CachedWallpaperEntity> { it.cachedAt }.thenBy { it.positionIndex })
+        override suspend fun getCacheMeta(cacheKey: String): QueryCacheMetaEntity? = meta[cacheKey]
+        override suspend fun getCacheTimestamp(cacheKey: String): Long? = meta[cacheKey]?.fetchedAtMillis
+        override fun observeCacheCount(): Flow<Int> =
+            cacheFlow.map { map -> map.values.sumOf { it.size } }
         override suspend fun insertCacheMeta(meta: QueryCacheMetaEntity) {
-            this.meta[meta.cacheKey] = meta.fetchedAtMillis
+            this.meta[meta.cacheKey] = meta
         }
         override suspend fun insertCachedWallpapers(items: List<CachedWallpaperEntity>) {
             val key = items.firstOrNull()?.cacheKey ?: return
-            cache[key] = items
+            cacheFlow.value = cacheFlow.value + (key to items)
         }
         override suspend fun deleteCacheForKey(cacheKey: String) {
-            cache.remove(cacheKey)
+            cacheFlow.value = cacheFlow.value - cacheKey
+        }
+        override suspend fun deleteCacheByCategory(category: String) {
+            cacheFlow.value = cacheFlow.value.mapValues { (_, list) ->
+                list.filterNot { it.category == category }
+            }.filterValues { it.isNotEmpty() }
+        }
+        override suspend fun deleteCacheMetaByCategory(category: String) {
+            meta.entries.removeAll { it.value.category == category }
         }
         override suspend fun clearAllCachedWallpapers() {
-            cache.clear()
+            cacheFlow.value = emptyMap()
         }
         override suspend fun clearAllCacheMeta() {
             meta.clear()
         }
         override suspend fun deleteExpiredCachedWallpapers(cutoffMillis: Long) {
-            val validKeys = meta.filterValues { it >= cutoffMillis }.keys
-            cache.keys.retainAll(validKeys)
+            val validKeys = meta.filterValues { it.fetchedAtMillis >= cutoffMillis }.keys
+            cacheFlow.value = cacheFlow.value.filterKeys { it in validKeys }
         }
         override suspend fun deleteExpiredCacheMeta(cutoffMillis: Long) {
-            meta.entries.removeAll { it.value < cutoffMillis }
+            meta.entries.removeAll { it.value.fetchedAtMillis < cutoffMillis }
         }
     }
 
@@ -504,12 +531,12 @@ class WallpaperRepositoryTest {
     }
 
     @Test
-    fun `pruneExpiredCache deletes expired entries while keeping fresh cache entries`() = runTest {
+    fun `pruneExpiredCache deletes entries older than 7-day retention while keeping offline fallback entries`() = runTest {
         val dao = FakeWallpaperDao()
-        val now = 1_000_000_000L
-        val ttlMillis = 24L * 60L * 60L * 1000L
-        val expiredTimestamp = now - ttlMillis - 60_000L
-        val freshTimestamp = now - 60_000L
+        val now = 10_000_000_000L
+        val retentionMillis = CacheExpiryPolicy.MAX_RETENTION_MILLIS
+        val expiredTimestamp = now - retentionMillis - 60_000L
+        val staleButRetainedTimestamp = now - TimeUnit.HOURS.toMillis(16) // Expired for refresh, kept for Offline Mode
 
         dao.replaceCacheForKey(
             cacheKey = "expired_key",
@@ -527,19 +554,23 @@ class WallpaperRepositoryTest {
                     width = 1920,
                     height = 1080,
                     source = "Wallhaven",
+                    category = "old_relevance",
+                    cachedAt = expiredTimestamp,
                 ),
             ),
             timestampMillis = expiredTimestamp,
+            category = "old_relevance",
+            expiresAtMillis = expiredTimestamp + CacheExpiryPolicy.DEFAULT_FEED_TTL_MILLIS,
         )
         dao.replaceCacheForKey(
-            cacheKey = "fresh_key",
+            cacheKey = "offline_fallback_key",
             items = listOf(
                 CachedWallpaperEntity(
-                    cacheKey = "fresh_key",
-                    wallpaperId = "new_1",
+                    cacheKey = "offline_fallback_key",
+                    wallpaperId = "offline_1",
                     positionIndex = 0,
-                    title = "New",
-                    animeSeries = "New",
+                    title = "Offline Safe",
+                    animeSeries = "Frieren",
                     imageUrl = "https://w.wallhaven.cc/full/new.jpg",
                     thumbnailUrl = "https://th.wallhaven.cc/orig/new.jpg",
                     videoUrl = null,
@@ -547,9 +578,13 @@ class WallpaperRepositoryTest {
                     width = 1920,
                     height = 1080,
                     source = "Wallhaven",
+                    category = "frieren_toplist",
+                    cachedAt = staleButRetainedTimestamp,
                 ),
             ),
-            timestampMillis = freshTimestamp,
+            timestampMillis = staleButRetainedTimestamp,
+            category = "frieren_toplist",
+            expiresAtMillis = staleButRetainedTimestamp + CacheExpiryPolicy.TOPLIST_FEED_TTL_MILLIS,
         )
 
         val unusedWallhaven = object : WallhavenService {
@@ -576,12 +611,110 @@ class WallpaperRepositoryTest {
             ): Response<RedditResponse> = Response.success(RedditResponse())
         }
 
-        val repo = WallpaperRepository(unusedWallhaven, unusedReddit, dao)
+        val repo = WallpaperRepository(unusedWallhaven, unusedReddit, dao, clock = { now })
         repo.pruneExpiredCache(nowMillis = now)
 
         assertTrue(dao.getCachedWallpapers("expired_key").isEmpty())
         assertNull(dao.getCacheTimestamp("expired_key"))
-        assertEquals(1, dao.getCachedWallpapers("fresh_key").size)
-        assertEquals(freshTimestamp, dao.getCacheTimestamp("fresh_key"))
+        assertEquals(1, dao.getCachedWallpapers("offline_fallback_key").size)
+        assertEquals(staleButRetainedTimestamp, dao.getCacheTimestamp("offline_fallback_key"))
+    }
+
+    @Test
+    fun `cache expiry policy enforces 4h default TTL and 12h toplist TTL with offline fallback`() = runTest {
+        var currentTimeMillis = 1_000_000_000L
+        val wallhavenCalls = AtomicInteger(0)
+        var failNetwork = false
+
+        val fakeWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                val callNum = wallhavenCalls.incrementAndGet()
+                if (failNetwork) throw IOException("Device offline")
+                return Response.success(
+                    WallhavenResponse(
+                        data = listOf(
+                            WallhavenItem(
+                                id = "item_$callNum",
+                                path = "https://w.wallhaven.cc/full/wh_$callNum.png",
+                                dimensionX = 2160,
+                                dimensionY = 3840,
+                                thumbs = WallhavenThumbs(original = "https://th.wallhaven.cc/orig/wh_$callNum.jpg"),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+        val emptyReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.success(RedditResponse())
+        }
+
+        val dao = FakeWallpaperDao()
+        val repo = WallpaperRepository(
+            wallhavenApi = fakeWallhaven,
+            redditApi = emptyReddit,
+            wallpaperDao = dao,
+            clock = { currentTimeMillis },
+        )
+
+        val latestFilter = WallpaperFilter(sort = SortOption.RECENT)
+        val toplistFilter = WallpaperFilter(sort = SortOption.TOPLIST)
+
+        // 1. Initial fetch writes to Room (1 Wallhaven call for latest, 1 for toplist)
+        val latestFirst = repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = latestFilter)
+        assertFalse(latestFirst.isFromCache)
+        assertEquals(1, wallhavenCalls.get())
+        assertEquals(1, repo.observeCachedWallpapers("Naruto", isLive = false, filter = latestFilter).first().size)
+
+        val toplistFirst = repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = toplistFilter)
+        assertFalse(toplistFirst.isFromCache)
+        assertEquals(2, wallhavenCalls.get())
+
+        // 2. Advance 3h 59m: both Latest (4h TTL) and Toplist (12h TTL) must serve from Room with 0 API calls
+        currentTimeMillis += TimeUnit.HOURS.toMillis(3) + TimeUnit.MINUTES.toMillis(59)
+        assertTrue(repo.isFeedCacheFresh("Naruto", isLive = false, filter = latestFilter))
+        assertTrue(repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = latestFilter).isFromCache)
+        assertTrue(repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = toplistFilter).isFromCache)
+        assertEquals(2, wallhavenCalls.get())
+
+        // 3. Advance past 4h (at 5h total): Latest expires & fetches fresh data, while Toplist (12h TTL) stays cached
+        currentTimeMillis += TimeUnit.HOURS.toMillis(1) + TimeUnit.MINUTES.toMillis(2)
+        assertFalse(repo.isFeedCacheFresh("Naruto", isLive = false, filter = latestFilter))
+        assertTrue(repo.isFeedCacheFresh("Naruto", isLive = false, filter = toplistFilter))
+
+        val latestRefreshed = repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = latestFilter)
+        assertFalse(latestRefreshed.isFromCache)
+        assertEquals(3, wallhavenCalls.get())
+        assertEquals("wh_item_3", latestRefreshed.wallpapers.first().id)
+
+        val toplistStillCached = repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = toplistFilter)
+        assertTrue(toplistStillCached.isFromCache)
+        assertEquals(3, wallhavenCalls.get())
+
+        // 4. Advance past 12h while offline: expired Toplist refresh fails network -> preserves & returns Room cache
+        currentTimeMillis += TimeUnit.HOURS.toMillis(8)
+        failNetwork = true
+        val offlineResult = repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = toplistFilter)
+        assertTrue(offlineResult.isFromCache)
+        assertEquals(1, offlineResult.wallpapers.size)
+        assertEquals("wh_item_2", offlineResult.wallpapers.first().id)
+        assertEquals(1, repo.getCachedWallpapersSnapshot("Naruto", isLive = false, filter = toplistFilter).size)
     }
 }
