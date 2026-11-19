@@ -2,14 +2,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
     <uses-permission android:name="android.permission.SET_WALLPAPER_HINTS" />
 
+
     <uses-feature
         android:name="android.software.live_wallpaper"
         android:required="false" />
+
 
     <application
         android:name="com.example.KuroWallApplication"
@@ -23,6 +26,7 @@
         android:theme="@style/Theme.MyApplication"
         android:usesCleartextTraffic="false">
 
+
         <activity
             android:name="com.example.MainActivity"
             android:exported="true"
@@ -33,6 +37,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
 
         <service
             android:name="com.example.service.AnimeLiveWallpaperService"
@@ -46,6 +51,7 @@
                 android:name="android.service.wallpaper"
                 android:resource="@xml/anime_live_wallpaper" />
         </service>
+
 
         <service
             android:name="com.example.service.AnimeLiveWallpaperAlternateService"
@@ -61,20 +67,22 @@
         </service>
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3940256099942544~3347511713" />
+            android:value="${ADMOB_APP_ID}" />
+
 
         <meta-data
             android:name="com.google.android.gms.ads.flag.OPTIMIZE_INITIALIZATION"
             android:value="true" />
 
+
         <meta-data
             android:name="com.google.android.gms.ads.flag.OPTIMIZE_AD_LOADING"
             android:value="true" />
+
 
         <meta-data
             android:name="com.google.android.gms.ads.flag.NATIVE_AD_DEBUGGER_ENABLED"
             android:value="false" />
 
     </application>
-
 </manifest>

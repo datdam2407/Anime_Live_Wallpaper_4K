@@ -1,6 +1,7 @@
 package com.example.data.remote
 
 
+import android.os.SystemClock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,7 +33,7 @@ class WallhavenRateLimiter(
     private val windowMillis: Long = DEFAULT_WINDOW_MILLIS,
     private val minSpacingMillis: Long = DEFAULT_MIN_SPACING_MILLIS,
     private val defaultCooldownMillis: Long = DEFAULT_COOLDOWN_MILLIS,
-    private val clock: () -> Long = { System.currentTimeMillis() },
+    private val clock: () -> Long = ::defaultMonotonicClock,
 ) {
     companion object {
         const val DISTRACTION_REQUEST_THRESHOLD = 40
@@ -41,6 +42,15 @@ class WallhavenRateLimiter(
         const val DEFAULT_MIN_SPACING_MILLIS = 450L
         const val DEFAULT_COOLDOWN_MILLIS = 45_000L
         const val DEFAULT_BREATHER_SECONDS = 4
+
+
+        /**
+         * Monotonic clock immune to NTP sync or user wall-clock changes.
+         * Falls back to System.nanoTime() when running in pure JVM unit tests without Robolectric.
+         */
+        fun defaultMonotonicClock(): Long =
+            runCatching { SystemClock.elapsedRealtime() }
+                .getOrElse { System.nanoTime() / 1_000_000L }
 
 
         private val ANIME_BREATHER_FACTS: List<Pair<String, String>> = listOf(
@@ -67,8 +77,8 @@ class WallhavenRateLimiter(
 
     private val mutex = Mutex()
     private val requestTimestamps = ArrayDeque<Long>()
-    private var lastRequestAtMs: Long = 0L
-    private var cooldownUntilMs: Long = 0L
+    private var lastRequestAtMs: Long = Long.MIN_VALUE
+    private var cooldownUntilMs: Long = Long.MIN_VALUE
     private var distractionShownInCurrentWindow: Boolean = false
     private var distractionSequence: Int = 0
 
@@ -90,7 +100,7 @@ class WallhavenRateLimiter(
                 pruneExpiredLocked(now)
 
 
-                if (now < cooldownUntilMs) {
+                if (cooldownUntilMs != Long.MIN_VALUE && now < cooldownUntilMs) {
                     return AcquireResult.RateLimited(
                         retryAfterMs = (cooldownUntilMs - now).coerceAtLeast(1_000L),
                         fromServer429 = true,
@@ -108,8 +118,8 @@ class WallhavenRateLimiter(
                 }
 
 
-                val elapsedSinceLast = now - lastRequestAtMs
-                if (lastRequestAtMs > 0L && elapsedSinceLast in 0 until minSpacingMillis) {
+                val elapsedSinceLast = if (lastRequestAtMs == Long.MIN_VALUE) Long.MAX_VALUE else now - lastRequestAtMs
+                if (lastRequestAtMs != Long.MIN_VALUE && elapsedSinceLast in 0 until minSpacingMillis) {
                     spacingDelayMs = minSpacingMillis - elapsedSinceLast
                 } else {
                     requestTimestamps.addLast(now)
@@ -148,7 +158,12 @@ class WallhavenRateLimiter(
                 ?.takeIf { it > 0L }
                 ?.let { (it * 1_000L).coerceIn(5_000L, 120_000L) }
                 ?: defaultCooldownMillis
-            cooldownUntilMs = maxOf(cooldownUntilMs, now + cooldownMs)
+            val targetUntil = now + cooldownMs
+            cooldownUntilMs = if (cooldownUntilMs == Long.MIN_VALUE) {
+                targetUntil
+            } else {
+                maxOf(cooldownUntilMs, targetUntil)
+            }
         }
     }
 
@@ -156,7 +171,7 @@ class WallhavenRateLimiter(
     suspend fun remainingQuota(): Int = mutex.withLock {
         val now = clock()
         pruneExpiredLocked(now)
-        if (now < cooldownUntilMs) {
+        if (cooldownUntilMs != Long.MIN_VALUE && now < cooldownUntilMs) {
             0
         } else {
             (maxRequestsPerWindow - requestTimestamps.size).coerceAtLeast(0)

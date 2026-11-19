@@ -1,5 +1,6 @@
 package com.example.ads
 
+
 import android.content.Context
 import com.google.android.gms.ads.AdListener
 import com.google.android.gms.ads.AdLoader
@@ -8,6 +9,8 @@ import com.google.android.gms.ads.LoadAdError
 import com.google.android.gms.ads.VideoOptions
 import com.google.android.gms.ads.nativead.NativeAd
 import com.google.android.gms.ads.nativead.NativeAdOptions
+import com.kuroanimelivewallpapers.app.BuildConfig
+
 
 /**
  * Pure, framework-agnostic FIFO buffer/queue engine for preloaded ads.
@@ -29,11 +32,13 @@ class NativeAdBuffer<T>(
         val loadedAtMs: Long,
     )
 
+
     private class PendingWaiter<T>(
         val onLoaded: (T) -> Unit,
         val onFailed: () -> Unit,
         var canceled: Boolean = false,
     )
+
 
     private val lock = Any()
     private val queue = ArrayDeque<BufferedItem<T>>()
@@ -41,14 +46,24 @@ class NativeAdBuffer<T>(
     private var inFlightCount: Int = 0
     private var isCleared: Boolean = false
 
+
     val bufferedCount: Int
-        get() = synchronized(lock) {
-            pruneExpiredLocked()
-            queue.size
+        get() {
+            val expired: List<T>
+            val size = synchronized(lock) {
+                expired = pruneExpiredLocked()
+                queue.size
+            }
+            if (expired.isNotEmpty()) {
+                expired.forEach(onDestroy)
+            }
+            return size
         }
+
 
     val activeInFlightCount: Int
         get() = synchronized(lock) { inFlightCount }
+
 
     /**
      * Triggers background loads until buffered + in-flight count reaches [bufferSize].
@@ -60,20 +75,26 @@ class NativeAdBuffer<T>(
         ensureBufferFilled()
     }
 
+
     /**
      * Synchronously pulls a preloaded ad from the queue if available, and immediately
      * refills the queue in the background. Returns null if the buffer is empty.
      */
     fun popAd(): T? {
         val popped: T?
+        val expired: List<T>
         synchronized(lock) {
             isCleared = false
-            pruneExpiredLocked()
+            expired = pruneExpiredLocked()
             popped = queue.removeFirstOrNull()?.ad
+        }
+        if (expired.isNotEmpty()) {
+            expired.forEach(onDestroy)
         }
         ensureBufferFilled()
         return popped
     }
+
 
     /**
      * Requests an ad: delivers synchronously from the buffer if non-empty, otherwise queues
@@ -90,6 +111,7 @@ class NativeAdBuffer<T>(
             return {}
         }
 
+
         val waiter = PendingWaiter(onLoaded = onLoaded, onFailed = onFailed)
         synchronized(lock) {
             isCleared = false
@@ -103,6 +125,7 @@ class NativeAdBuffer<T>(
             }
         }
     }
+
 
     /**
      * Destroys all buffered ads and cancels all pending UI waiters.
@@ -121,17 +144,23 @@ class NativeAdBuffer<T>(
         toDestroy.forEach(onDestroy)
     }
 
+
     private fun ensureBufferFilled() {
+        var expired: List<T> = emptyList()
         val needed = synchronized(lock) {
             if (isCleared) return
-            pruneExpiredLocked()
+            expired = pruneExpiredLocked()
             val desired = maxOf(bufferSize, waiters.size.coerceAtMost(bufferSize))
             (desired - (queue.size + inFlightCount)).coerceAtLeast(0)
+        }
+        if (expired.isNotEmpty()) {
+            expired.forEach(onDestroy)
         }
         repeat(needed) {
             launchSingleLoad()
         }
     }
+
 
     private fun launchSingleLoad() {
         synchronized(lock) {
@@ -144,9 +173,12 @@ class NativeAdBuffer<T>(
         )
     }
 
+
     private fun handleLoadSuccess(loadedAd: T) {
         var deliverTo: PendingWaiter<T>? = null
         var shouldDestroyExcess = false
+        var expired: List<T> = emptyList()
+
 
         synchronized(lock) {
             inFlightCount = (inFlightCount - 1).coerceAtLeast(0)
@@ -161,7 +193,7 @@ class NativeAdBuffer<T>(
                     }
                 }
                 if (deliverTo == null) {
-                    pruneExpiredLocked()
+                    expired = pruneExpiredLocked()
                     if (queue.size < bufferSize) {
                         queue.addLast(BufferedItem(ad = loadedAd, loadedAtMs = clockMillis()))
                     } else {
@@ -170,6 +202,12 @@ class NativeAdBuffer<T>(
                 }
             }
         }
+
+
+        if (expired.isNotEmpty()) {
+            expired.forEach(onDestroy)
+        }
+
 
         when {
             shouldDestroyExcess -> onDestroy(loadedAd)
@@ -181,36 +219,43 @@ class NativeAdBuffer<T>(
         }
     }
 
+
     private fun handleLoadFailure() {
-        var failWaiter: PendingWaiter<T>? = null
+        val failedWaiters = mutableListOf<PendingWaiter<T>>()
         synchronized(lock) {
             inFlightCount = (inFlightCount - 1).coerceAtLeast(0)
             if (waiters.isNotEmpty() && queue.isEmpty() && inFlightCount == 0) {
                 while (waiters.isNotEmpty()) {
                     val candidate = waiters.removeFirst()
                     if (!candidate.canceled) {
-                        failWaiter = candidate
-                        break
+                        failedWaiters += candidate
                     }
                 }
             }
         }
-        failWaiter?.onFailed?.invoke()
+        failedWaiters.forEach { it.onFailed() }
     }
 
-    private fun pruneExpiredLocked() {
+
+    private fun pruneExpiredLocked(): List<T> {
         val now = clockMillis()
+        var expired: MutableList<T>? = null
         while (queue.isNotEmpty()) {
             val head = queue.first()
             if (now - head.loadedAtMs >= maxAgeMs) {
                 queue.removeFirst()
-                onDestroy(head.ad)
+                if (expired == null) {
+                    expired = mutableListOf()
+                }
+                expired += head.ad
             } else {
                 break
             }
         }
+        return expired ?: emptyList()
     }
 }
+
 
 /**
  * Application-scoped Native Ad Manager maintaining a 2-3 [NativeAd] preload queue/buffer
@@ -221,10 +266,11 @@ class NativeAdBuffer<T>(
  */
 class NativeAdManager(
     appContext: Context,
-    val adUnitId: String = AdMobConstants.TEST_NATIVE_ADVANCED_UNIT_ID,
+    val adUnitId: String = BuildConfig.ADMOB_NATIVE_AD_UNIT_ID,
     val bufferSize: Int = AdMobConstants.NATIVE_AD_BUFFER_SIZE,
 ) {
     private val context = appContext.applicationContext
+
 
     private val buffer = NativeAdBuffer<NativeAd>(
         bufferSize = bufferSize.coerceIn(2, 3),
@@ -232,23 +278,29 @@ class NativeAdManager(
         startLoad = { onLoaded, onFailed -> loadNativeAd(onLoaded, onFailed) },
     )
 
+
     val bufferedCount: Int
         get() = buffer.bufferedCount
+
 
     fun preloadBuffer() {
         buffer.preloadBuffer()
     }
 
+
     fun popAd(): NativeAd? = buffer.popAd()
+
 
     fun requestAd(
         onLoaded: (NativeAd) -> Unit,
         onFailed: () -> Unit,
     ): () -> Unit = buffer.requestAd(onLoaded = onLoaded, onFailed = onFailed)
 
+
     fun clearBuffer() {
         buffer.clear()
     }
+
 
     private fun loadNativeAd(
         onLoaded: (NativeAd) -> Unit,
@@ -261,6 +313,7 @@ class NativeAdManager(
             .setAdChoicesPlacement(NativeAdOptions.ADCHOICES_TOP_RIGHT)
             .setVideoOptions(videoOptions)
             .build()
+
 
         runCatching {
             val loader = AdLoader.Builder(context, adUnitId)
@@ -276,6 +329,7 @@ class NativeAdManager(
                 )
                 .withNativeAdOptions(adOptions)
                 .build()
+
 
             loader.loadAd(AdRequest.Builder().build())
         }.onFailure {

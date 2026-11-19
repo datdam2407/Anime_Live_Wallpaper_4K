@@ -1,4 +1,48 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.util.Properties
+
+
+val envProperties = Properties().apply {
+  val envFile = rootProject.file(".env")
+  if (envFile.exists()) {
+    envFile.inputStream().use { load(it) }
+  }
+}
+
+
+fun readEnvConfig(key: String): String? {
+  return envProperties.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() }
+    ?: System.getenv(key)?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+
+val testAdMobAppId = "ca-app-pub-3940256099942544~3347511713"
+val testAdMobBannerId = "ca-app-pub-3940256099942544/9214589741"
+val testAdMobInterstitialId = "ca-app-pub-3940256099942544/1033173712"
+val testAdMobNativeId = "ca-app-pub-3940256099942544/2247696110"
+
+
+val useProductionAdMob = readEnvConfig("ADMOB_USE_PRODUCTION_IDS").equals("true", ignoreCase = true)
+val releaseAdMobAppId = if (useProductionAdMob) {
+  readEnvConfig("ADMOB_PROD_APP_ID") ?: testAdMobAppId
+} else {
+  testAdMobAppId
+}
+val releaseAdMobBannerId = if (useProductionAdMob) {
+  readEnvConfig("ADMOB_PROD_BANNER_AD_UNIT_ID") ?: testAdMobBannerId
+} else {
+  testAdMobBannerId
+}
+val releaseAdMobInterstitialId = if (useProductionAdMob) {
+  readEnvConfig("ADMOB_PROD_INTERSTITIAL_AD_UNIT_ID") ?: testAdMobInterstitialId
+} else {
+  testAdMobInterstitialId
+}
+val releaseAdMobNativeId = if (useProductionAdMob) {
+  readEnvConfig("ADMOB_PROD_NATIVE_AD_UNIT_ID") ?: testAdMobNativeId
+} else {
+  testAdMobNativeId
+}
 
 
 plugins {
@@ -13,29 +57,38 @@ plugins {
 
 android {
   namespace = "com.kuroanimelivewallpapers.app"
-  compileSdk = 36
+  compileSdk { version = release(36) { minorApiLevel = 1 } }
 
 
   defaultConfig {
     applicationId = "com.kuroanimelivewallpapers.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "1.0.2"
+    versionCode = 2
+    versionName = "1.0.1"
 
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
-/*
+
+  // Do not remove or modify these signingConfigs. They are necessary for building, installing,
+  // and updating Android apps in AI Studio.
   signingConfigs {
+    create("release") {
+      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      storeFile = file(keystorePath)
+      storePassword = System.getenv("STORE_PASSWORD")
+      keyAlias = "upload"
+      keyPassword = System.getenv("KEY_PASSWORD")
+    }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
     }
-  }*/
+  }
 
 
   buildTypes {
@@ -44,27 +97,34 @@ android {
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      manifestPlaceholders["ADMOB_APP_ID"] = releaseAdMobAppId
+      buildConfigField("String", "ADMOB_APP_ID", "\"$releaseAdMobAppId\"")
+      buildConfigField("String", "ADMOB_BANNER_AD_UNIT_ID", "\"$releaseAdMobBannerId\"")
+      buildConfigField("String", "ADMOB_INTERSTITIAL_AD_UNIT_ID", "\"$releaseAdMobInterstitialId\"")
+      buildConfigField("String", "ADMOB_NATIVE_AD_UNIT_ID", "\"$releaseAdMobNativeId\"")
+      // Chỉ gắn signingConfig nếu project local có khai báo signingConfigs.create("release")
+      signingConfigs.findByName("release")?.let { signingConfig = it }
     }
     debug {
-      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in AI Studio.
-     // signingConfig = signingConfigs.getByName("debugConfig")
+      manifestPlaceholders["ADMOB_APP_ID"] = testAdMobAppId
+      buildConfigField("String", "ADMOB_APP_ID", "\"$testAdMobAppId\"")
+      buildConfigField("String", "ADMOB_BANNER_AD_UNIT_ID", "\"$testAdMobBannerId\"")
+      buildConfigField("String", "ADMOB_INTERSTITIAL_AD_UNIT_ID", "\"$testAdMobInterstitialId\"")
+      buildConfigField("String", "ADMOB_NATIVE_AD_UNIT_ID", "\"$testAdMobNativeId\"")
+      // Không cần set signingConfig ở đây — Android Studio tự dùng debug keystore mặc định
     }
   }
+
 
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
   }
-
   buildFeatures {
     compose = true
     buildConfig = true
   }
-
-  testOptions {
-    unitTests { isIncludeAndroidResources = true }
-  }
-
+  testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
@@ -78,6 +138,7 @@ secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
   ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
+  ignoreList.add("ADMOB_.*")
 }
 
 
@@ -137,6 +198,7 @@ dependencies {
   implementation(libs.androidx.media3.effect)
   implementation(libs.androidx.media3.ui)
   implementation(libs.play.services.ads)
+  implementation(libs.user.messaging.platform)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -153,6 +215,7 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+
 
 
 

@@ -2,10 +2,12 @@ package com.example.di
 
 
 import android.content.Context
+import android.os.SystemClock
 import coil.ImageLoader
 import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import com.example.ads.GoogleMobileAdsConsentManager
 import com.example.ads.InterstitialAdManager
 import com.example.ads.NativeAdManager
 import com.example.data.local.KuroWallDatabase
@@ -64,7 +66,7 @@ class AppContainer(context: Context) {
 
 
     val wallhavenRateLimiter: WallhavenRateLimiter by lazy {
-        WallhavenRateLimiter()
+        WallhavenRateLimiter(clock = { SystemClock.elapsedRealtime() })
     }
 
 
@@ -92,6 +94,11 @@ class AppContainer(context: Context) {
             context = appContext,
             mediaOkHttpClient = NetworkModule.mediaOkHttpClient,
         )
+    }
+
+
+    val consentManager: GoogleMobileAdsConsentManager by lazy {
+        GoogleMobileAdsConsentManager(appContext)
     }
 
 

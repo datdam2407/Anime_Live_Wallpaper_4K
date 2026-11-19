@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import com.kuroanimelivewallpapers.app.BuildConfig
 import com.kuroanimelivewallpapers.app.R
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -81,7 +82,6 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.example.ads.AdaptiveBannerAd
-import com.example.ads.AdMobConstants
 import com.example.ads.findActivity
 import com.example.domain.model.WallpaperTarget
 import com.example.ui.components.RateLimitBreatherDialog
@@ -145,21 +145,12 @@ private fun KuroWallAppRoot(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
-    val interstitialAdManager = remember(context) {
-        (context.applicationContext as KuroWallApplication).container.interstitialAdManager
+    val appContainer = remember(context) {
+        (context.applicationContext as KuroWallApplication).container
     }
-    val nativeAdManager = remember(context) {
-        (context.applicationContext as KuroWallApplication).container.nativeAdManager
-    }
-
-
-    val homeState by viewModel.homeState.collectAsStateWithLifecycle()
-    val categories by viewModel.filteredCategories.collectAsStateWithLifecycle()
-    val categoryFilterText by viewModel.categoryFilterText.collectAsStateWithLifecycle()
-    val favorites by viewModel.favorites.collectAsStateWithLifecycle()
-    val favoriteIdsState = viewModel.favoriteIds.collectAsStateWithLifecycle()
-    val settings by viewModel.settings.collectAsStateWithLifecycle()
-    val rateLimitDistraction by viewModel.rateLimitDistraction.collectAsStateWithLifecycle()
+    val consentManager = appContainer.consentManager
+    val interstitialAdManager = appContainer.interstitialAdManager
+    val nativeAdManager = appContainer.nativeAdManager
 
 
     var pendingLiveWallpaperComponent by rememberSaveable { mutableStateOf<String?>(null) }
@@ -204,9 +195,17 @@ private fun KuroWallAppRoot(
     }
 
 
-    LaunchedEffect(interstitialAdManager, nativeAdManager) {
-        interstitialAdManager.preload(context)
-        nativeAdManager.preloadBuffer()
+    // Gather Google UMP GDPR/CCPA consent BEFORE initializing MobileAds and preloading ads.
+    LaunchedEffect(activity, consentManager, interstitialAdManager, nativeAdManager) {
+        if (activity != null) {
+            consentManager.gatherConsentAndInitializeAds(
+                activity = activity,
+                onAdsReady = {
+                    interstitialAdManager.preload(context)
+                    nativeAdManager.preloadBuffer()
+                },
+            )
+        }
     }
 
 
@@ -370,7 +369,7 @@ private fun KuroWallAppRoot(
 
 
                         AdaptiveBannerAd(
-                            adUnitId = AdMobConstants.TEST_ADAPTIVE_BANNER_UNIT_ID,
+                            adUnitId = BuildConfig.ADMOB_BANNER_AD_UNIT_ID,
                             topSafeMargin = 10.dp,
                         )
                     }
@@ -428,8 +427,9 @@ private fun KuroWallAppRoot(
                                             )
                                 },
                             ) {
+                                val isPreloadComplete by viewModel.isSplashPreloadComplete.collectAsStateWithLifecycle()
                                 SplashScreen(
-                                    isPreloadComplete = homeState.isSplashPreloadComplete,
+                                    isPreloadComplete = isPreloadComplete,
                                     onFinished = {
                                         navController.navigate(HomeRoute) {
                                             popUpTo(SplashRoute) { inclusive = true }
@@ -452,6 +452,8 @@ private fun KuroWallAppRoot(
                                     }
                                 },
                             ) {
+                                val homeState by viewModel.homeState.collectAsStateWithLifecycle()
+                                val favoriteIdsState = viewModel.favoriteIds.collectAsStateWithLifecycle()
                                 HomeScreen(
                                     uiState = homeState,
                                     favoriteIdsState = favoriteIdsState,
@@ -476,6 +478,8 @@ private fun KuroWallAppRoot(
 
 
                             composable<CategoriesRoute> {
+                                val categories by viewModel.filteredCategories.collectAsStateWithLifecycle()
+                                val categoryFilterText by viewModel.categoryFilterText.collectAsStateWithLifecycle()
                                 CategoriesScreen(
                                     categories = categories,
                                     filterText = categoryFilterText,
@@ -490,6 +494,7 @@ private fun KuroWallAppRoot(
 
 
                             composable<FavoritesRoute> {
+                                val favorites by viewModel.favorites.collectAsStateWithLifecycle()
                                 FavoritesScreen(
                                     favorites = favorites,
                                     onOpenDetail = { index, feedSource ->
@@ -507,6 +512,7 @@ private fun KuroWallAppRoot(
 
 
                             composable<SettingsRoute> {
+                                val settings by viewModel.settings.collectAsStateWithLifecycle()
                                 SettingsScreen(
                                     settings = settings,
                                     onResolutionSelected = viewModel::updatePreferredResolution,
@@ -546,6 +552,10 @@ private fun KuroWallAppRoot(
                                 },
                             ) { entry ->
                                 val route = entry.toRoute<DetailRoute>()
+                                val homeState by viewModel.homeState.collectAsStateWithLifecycle()
+                                val favorites by viewModel.favorites.collectAsStateWithLifecycle()
+                                val favoriteIdsState = viewModel.favoriteIds.collectAsStateWithLifecycle()
+                                val settings by viewModel.settings.collectAsStateWithLifecycle()
                                 val feed = remember(route.feedSource, homeState.feedStatus, favorites) {
                                     viewModel.getCurrentFeedList(route.feedSource)
                                 }
@@ -576,7 +586,7 @@ private fun KuroWallAppRoot(
                     }
                     if (!isFullScreenRoute && useNavigationRail) {
                         AdaptiveBannerAd(
-                            adUnitId = AdMobConstants.TEST_ADAPTIVE_BANNER_UNIT_ID,
+                            adUnitId = BuildConfig.ADMOB_BANNER_AD_UNIT_ID,
                             topSafeMargin = 10.dp,
                         )
                     }
@@ -585,13 +595,26 @@ private fun KuroWallAppRoot(
         }
 
 
-        rateLimitDistraction?.let { prompt ->
-            if (currentDestination?.hasRoute<SplashRoute>() != true) {
-                RateLimitBreatherDialog(
-                    prompt = prompt,
-                    onDismiss = viewModel::dismissRateLimitDistraction,
-                )
-            }
+        RateLimitBreatherHost(
+            viewModel = viewModel,
+            isSplashRoute = currentDestination?.hasRoute<SplashRoute>() == true,
+        )
+    }
+}
+
+
+@Composable
+private fun RateLimitBreatherHost(
+    viewModel: MainViewModel,
+    isSplashRoute: Boolean,
+) {
+    val rateLimitDistraction by viewModel.rateLimitDistraction.collectAsStateWithLifecycle()
+    rateLimitDistraction?.let { prompt ->
+        if (!isSplashRoute) {
+            RateLimitBreatherDialog(
+                prompt = prompt,
+                onDismiss = viewModel::dismissRateLimitDistraction,
+            )
         }
     }
 }

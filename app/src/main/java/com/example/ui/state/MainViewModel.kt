@@ -90,10 +90,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mediaDownloadManager = container.mediaDownloadManager
     private val interstitialAdManager = container.interstitialAdManager
     private val nativeAdManager = container.nativeAdManager
+    private val consentManager = container.consentManager
     private val wallhavenRateLimiter = container.wallhavenRateLimiter
 
 
     private val _rawState = MutableStateFlow(HomeUiState())
+    private val _isSplashPreloadComplete = MutableStateFlow(false)
+    val isSplashPreloadComplete: StateFlow<Boolean> = _isSplashPreloadComplete.asStateFlow()
     private val _categories = MutableStateFlow(AnimeCatalog.allTwoHundred)
     private val _categoryFilterText = MutableStateFlow("")
     private var feedJob: Job? = null
@@ -149,15 +152,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Executes during the 5-second Splash Screen window:
-     * 1. Pre-loads Interstitial & Native Ad buffers on the Main thread so ads are cached early.
+     * 1. Waits for Google UMP GDPR/CCPA consent before preloading Interstitial & Native Ads on Main.
      * 2. Warms Live MP4 catalog, prunes expired Room cache, and pre-decodes Splash hero art.
      * 3. Fetches Page 1 of the initial Home API feed + warms Home & Carousel thumbnails,
      *    then queues Page 2 trending prefetch in the background.
      */
     private fun runSplashPreloadQueue() {
         viewModelScope.launch {
-            // Stage 1: Kick off AdMob Interstitial + Native Ad buffer preloading & local warmups concurrently
+            // Stage 1: Start local warmups immediately; gate AdMob preloading strictly on UMP consent
             launch {
+                consentManager.canRequestAds.first { it }
                 withContext(Dispatchers.Main.immediate) {
                     interstitialAdManager.preload()
                     nativeAdManager.preloadBuffer()
@@ -179,6 +183,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             loadFeed(forceRefresh = false)
             feedJob?.join()
+            _isSplashPreloadComplete.value = true
             _rawState.update { it.copy(isSplashPreloadComplete = true) }
         }
     }
