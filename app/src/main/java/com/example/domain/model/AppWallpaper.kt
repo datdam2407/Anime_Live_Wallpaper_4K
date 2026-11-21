@@ -10,12 +10,22 @@ data class AppWallpaper(
     val imageUrl: String,
     val thumbnailUrl: String,
     val videoUrl: String? = null,
+    val previewVideoUrl: String? = null,
     val isLive: Boolean = false,
     val width: Int = 1080,
     val height: Int = 1920,
     val source: String,
     val isFavorite: Boolean = false,
+    val tags: List<String> = emptyList(),
+    val sizeMb: Double? = null,
 ) {
+    /**
+     * Lightweight preview clip URL (~350 KB) used in DetailPreviewScreen ExoPlayer
+     * before the user downloads the full high-bitrate MP4 (~1–8 MB).
+     */
+    val effectivePreviewVideoUrl: String?
+        get() = previewVideoUrl?.takeIf { it.isNotBlank() } ?: videoUrl
+
     val resolutionLabel: String
         get() {
             val maxDim = maxOf(width, height)

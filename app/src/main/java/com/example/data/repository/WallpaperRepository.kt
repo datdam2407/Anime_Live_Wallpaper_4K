@@ -2,7 +2,6 @@ package com.example.data.repository
 
 import android.util.Log
 import com.example.data.local.CacheExpiryPolicy
-import com.example.data.local.LiveWallpaperDataSource
 import com.example.data.local.dao.WallpaperDao
 import com.example.data.local.entity.CachedWallpaperEntity
 import com.example.data.local.entity.FavoriteWallpaperEntity
@@ -12,10 +11,13 @@ import com.example.data.remote.WallhavenRateLimiter
 import com.example.data.remote.WallhavenResponse
 import com.example.data.remote.WallhavenService
 import com.example.domain.model.AnimeCatalog
+import com.example.domain.model.AnimeCategory
+import com.example.domain.model.AnimeSeriesPreview
 import com.example.domain.model.AppWallpaper
 import com.example.domain.model.ResolutionTier
 import com.example.domain.model.SortOption
 import com.example.domain.model.WallpaperFilter
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -45,6 +47,12 @@ data class WallpaperFetchResult(
     val warningMessage: String? = null,
 )
 
+data class CollectionPageResult(
+    val wallpapers: List<AppWallpaper>,
+    val totalCount: Int,
+    val hasMore: Boolean,
+)
+
 private sealed interface ApiCallOutcome<out T> {
     data class Success<T>(val response: Response<T>) : ApiCallOutcome<T>
     data class HttpFailure(
@@ -59,9 +67,9 @@ class WallpaperRepository(
     private val wallhavenApi: WallhavenService,
     private val redditApi: RedditService,
     private val wallpaperDao: WallpaperDao,
-    private val liveWallpaperDataSource: LiveWallpaperDataSource = LiveWallpaperDataSource { "[]" },
     private val wallhavenRateLimiter: WallhavenRateLimiter = WallhavenRateLimiter(),
     private val clock: () -> Long = { System.currentTimeMillis() },
+    private val liveWallpaperRepository: LiveWallpaperRepository? = null,
 ) {
     companion object {
         private const val TAG = "WallpaperRepository"
@@ -72,6 +80,7 @@ class WallpaperRepository(
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inFlightMutex = Mutex()
     private val inFlightStaticRequests = mutableMapOf<String, Deferred<WallpaperFetchResult>>()
+    private val seriesTotalCounts = ConcurrentHashMap<String, Int>()
 
     fun close() {
         repositoryScope.cancel()
@@ -188,12 +197,13 @@ class WallpaperRepository(
     ): List<AppWallpaper> = withContext(Dispatchers.IO) {
         val normalizedQuery = query.trim().ifEmpty { HOME_TRENDING_KEY }
         if (isLive) {
-            val bundled = liveWallpaperDataSource.getLiveWallpapersPage(
+            liveWallpaperRepository?.getCachedCatalogSnapshot(
                 query = normalizedQuery,
                 page = page,
-                pageSize = LiveWallpaperDataSource.DEFAULT_PAGE_SIZE,
-            )
-            if (bundled.items.isNotEmpty()) return@withContext bundled.items
+                pageSize = LiveWallpaperRepository.DEFAULT_PAGE_SIZE,
+            )?.let { snapshot ->
+                if (snapshot.items.isNotEmpty()) return@withContext snapshot.items
+            }
         }
         if (!isLive && normalizedQuery == HOME_TRENDING_KEY) {
             val (batchTopics, topicPage) = resolveTrendingBatch(page) ?: return@withContext emptyList()
@@ -219,12 +229,13 @@ class WallpaperRepository(
     ): Boolean = withContext(Dispatchers.IO) {
         val normalizedQuery = query.trim().ifEmpty { HOME_TRENDING_KEY }
         if (isLive) {
-            val bundled = liveWallpaperDataSource.getLiveWallpapersPage(
+            liveWallpaperRepository?.getCachedCatalogSnapshot(
                 query = normalizedQuery,
                 page = page,
-                pageSize = LiveWallpaperDataSource.DEFAULT_PAGE_SIZE,
-            )
-            if (bundled.items.isNotEmpty()) return@withContext true
+                pageSize = LiveWallpaperRepository.DEFAULT_PAGE_SIZE,
+            )?.let { snapshot ->
+                if (snapshot.items.isNotEmpty()) return@withContext true
+            }
         }
         if (!isLive && normalizedQuery == HOME_TRENDING_KEY) {
             val (batchTopics, topicPage) = resolveTrendingBatch(page) ?: return@withContext false
@@ -268,7 +279,357 @@ class WallpaperRepository(
     )
 
     suspend fun warmupLiveCatalog() = withContext(Dispatchers.IO) {
-        liveWallpaperDataSource.getAllParsedItems()
+        liveWallpaperRepository?.fetchLiveWallpapers(forceRefresh = false)
+    }
+
+    /**
+     * Instant local-only Room lookup (0 network calls) for a SearchScreen Trending Category card.
+     */
+    suspend fun getCachedExploreCategoryStaticCovers(
+        topic: com.example.domain.model.TrendingAnimeTopic,
+        filter: WallpaperFilter = WallpaperFilter(),
+        maxCount: Int = 10,
+    ): List<String> = withContext(Dispatchers.IO) {
+        val cacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = 1)
+        wallpaperDao.getCachedWallpapers(cacheKey)
+            .mapNotNull { it.thumbnailUrl.takeIf(String::isNotBlank) }
+            .distinct()
+            .take(maxCount)
+    }
+
+    /**
+     * Returns up to [maxCount] distinct static wallpaper thumbnail URLs for a SearchScreen
+     * Trending Category card. Prefers local Room cache (0 network calls); when empty, fetches
+     * page 1 via Wallhaven (if rate-limit quota allows, also caching all ~24 wallpapers for
+     * instant browsing later) or falls back to Reddit r/MobileWallpaper.
+     */
+    suspend fun getExploreCategoryStaticCovers(
+        topic: com.example.domain.model.TrendingAnimeTopic,
+        filter: WallpaperFilter = WallpaperFilter(),
+        maxCount: Int = 10,
+    ): List<String> = withContext(Dispatchers.IO) {
+        val cacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = 1)
+        val cachedUrls = wallpaperDao.getCachedWallpapers(cacheKey)
+            .mapNotNull { it.thumbnailUrl.takeIf(String::isNotBlank) }
+            .distinct()
+        if (cachedUrls.isNotEmpty()) {
+            return@withContext cachedUrls.take(maxCount)
+        }
+
+        if (wallhavenRateLimiter.remainingQuota() > 10) {
+            val fetched = coalesceStaticFetch(
+                query = topic.title,
+                cacheKey = cacheKey,
+                staleCache = emptyList(),
+                filter = filter,
+                page = 1,
+                skipRedditUnlessNeeded = true,
+            )
+            val fetchedUrls = fetched.wallpapers
+                .mapNotNull { it.thumbnailUrl.takeIf(String::isNotBlank) }
+                .distinct()
+            if (fetchedUrls.isNotEmpty()) {
+                return@withContext fetchedUrls.take(maxCount)
+            }
+        }
+
+        val redditOutcome = safeApiCall("Reddit/MobileWallpaper-cover") {
+            redditApi.searchSubreddit(
+                subreddit = "MobileWallpaper",
+                query = topic.query,
+                sort = "top",
+                limit = 20,
+            )
+        }
+        val posts = (redditOutcome as? ApiCallOutcome.Success)?.response?.body()?.data?.children.orEmpty()
+        posts.mapNotNull { child ->
+            val post = child.data
+            if (post.over18 || post.isSelf || post.isVideo) return@mapNotNull null
+            extractStaticRedditImage(post)?.thumbnailUrl?.takeIf(String::isNotBlank)
+        }
+            .distinct()
+            .take(maxCount)
+    }
+
+    /**
+     * Instant local-only preview lookup (0 network calls) for an Anime 200+ collection row.
+     * Combines Room-cached static wallpapers and in-memory R2 live wallpapers in deterministic order
+     * so each of the 4 strip tiles maps 1-to-1 to its exact index in DetailPreviewScreen.
+     */
+    suspend fun getCachedAnimeCategoryPreview(
+        category: AnimeCategory,
+        filter: WallpaperFilter = WallpaperFilter(),
+    ): AnimeSeriesPreview? = withContext(Dispatchers.IO) {
+        val queryCacheKey = buildCacheKey(category.query, isLive = false, filter = filter, page = 1)
+        val titleCacheKey = buildCacheKey(category.title, isLive = false, filter = filter, page = 1)
+        val cachedEntities = wallpaperDao.getCachedWallpapers(queryCacheKey).ifEmpty {
+            if (!titleCacheKey.equals(queryCacheKey, ignoreCase = true)) {
+                wallpaperDao.getCachedWallpapers(titleCacheKey)
+            } else {
+                emptyList()
+            }
+        }
+        val staticWallpapers = cachedEntities
+            .map { it.toDomain() }
+            .filter { it.thumbnailUrl.isNotBlank() }
+        val liveWallpapers = liveWallpaperRepository
+            ?.getCachedCatalogSnapshot(category.title, page = 1, pageSize = 14)
+            ?.items
+            .orEmpty()
+            .filter { it.thumbnailUrl.isNotBlank() }
+        val combinedWallpapers = (staticWallpapers + liveWallpapers).distinctBy { it.id }
+        if (combinedWallpapers.isEmpty()) return@withContext null
+
+        val rememberedTotal = seriesTotalCounts[category.query.lowercase()]
+            ?: seriesTotalCounts[category.title.lowercase()]
+            ?: 0
+        val estimatedTotal = maxOf(rememberedTotal, combinedWallpapers.size)
+
+        AnimeSeriesPreview(
+            categoryId = category.id,
+            thumbnailUrls = combinedWallpapers.take(4).map { it.thumbnailUrl },
+            wallpapers = combinedWallpapers,
+            totalCount = estimatedTotal,
+            isLoading = false,
+        )
+    }
+
+    /**
+     * Loads up to 4 real anime thumbnails, the ordered Page-1 wallpapers, and total wallpaper count
+     * for an Anime 200+ row. Uses Room cache first (0 network calls), then Wallhaven (when quota
+     * headroom > 12, caching Page 1 in Room), falling back to Reddit r/Animewallpaper.
+     */
+    suspend fun fetchAnimeCategoryPreview(
+        category: AnimeCategory,
+        filter: WallpaperFilter = WallpaperFilter(),
+    ): AnimeSeriesPreview = withContext(Dispatchers.IO) {
+        val cached = getCachedAnimeCategoryPreview(category, filter)
+        val hasKnownTotal = seriesTotalCounts.containsKey(category.query.lowercase()) ||
+                seriesTotalCounts.containsKey(category.title.lowercase())
+        if (cached != null && cached.wallpapers.size >= 4 && (hasKnownTotal || cached.totalCount >= 12)) {
+            return@withContext cached
+        }
+
+        val collectedById = LinkedHashMap<String, AppWallpaper>()
+        cached?.wallpapers?.forEach { collectedById.putIfAbsent(it.id, it) }
+        var resolvedTotal = cached?.totalCount ?: 0
+
+        val cacheKey = buildCacheKey(category.query, isLive = false, filter = filter, page = 1)
+
+        if (wallhavenRateLimiter.remainingQuota() > 12) {
+            val pageResult = fetchWallhavenCategoryPage(
+                category = category,
+                filter = filter,
+                page = 1,
+                cacheKey = cacheKey,
+            )
+            pageResult.wallpapers.forEach { wp -> collectedById.putIfAbsent(wp.id, wp) }
+            resolvedTotal = maxOf(resolvedTotal, pageResult.totalCount, collectedById.size)
+        }
+
+        if (collectedById.size < 4) {
+            val redditOutcome = safeApiCall("Reddit/CategoryPreview") {
+                redditApi.searchSubreddit(
+                    subreddit = "Animewallpaper",
+                    query = category.query,
+                    sort = "top",
+                    limit = 25,
+                )
+            }
+            val posts = (redditOutcome as? ApiCallOutcome.Success)?.response?.body()?.data?.children.orEmpty()
+            val redditWallpapers = posts.mapNotNull { child ->
+                val post = child.data
+                if (post.over18 || post.isSelf || post.isVideo) return@mapNotNull null
+                val extracted = extractStaticRedditImage(post) ?: return@mapNotNull null
+                AppWallpaper(
+                    id = "rd_${post.id}",
+                    title = post.title.ifBlank { category.title },
+                    animeSeries = category.title,
+                    imageUrl = extracted.originalUrl,
+                    thumbnailUrl = extracted.thumbnailUrl,
+                    videoUrl = null,
+                    isLive = false,
+                    width = extracted.width,
+                    height = extracted.height,
+                    source = "Reddit",
+                )
+            }
+            redditWallpapers.forEach { wp -> collectedById.putIfAbsent(wp.id, wp) }
+            resolvedTotal = maxOf(resolvedTotal, redditWallpapers.size, collectedById.size)
+        }
+
+        val orderedWallpapers = collectedById.values.toList()
+        val liveCount = liveWallpaperRepository?.getCachedCatalogSnapshot(category.title)?.totalCount ?: 0
+        if (liveCount > 0 && resolvedTotal <= orderedWallpapers.size) {
+            resolvedTotal = maxOf(resolvedTotal, orderedWallpapers.size + liveCount)
+        }
+
+        AnimeSeriesPreview(
+            categoryId = category.id,
+            thumbnailUrls = orderedWallpapers.take(4).map { it.thumbnailUrl },
+            wallpapers = orderedWallpapers,
+            totalCount = maxOf(resolvedTotal, orderedWallpapers.size),
+            isLoading = false,
+        )
+    }
+
+    /**
+     * Fetches subsequent pages (page 2, 3, ...) of an Anime 200+ collection using the exact same
+     * Wallhaven query parameters as the preview strip so users can swipe smoothly through all
+     * remaining (+N) wallpapers directly inside DetailPreviewScreen.
+     */
+    suspend fun fetchAnimeCategoryDetailPage(
+        category: AnimeCategory,
+        filter: WallpaperFilter = WallpaperFilter(),
+        page: Int,
+    ): CollectionPageResult = withContext(Dispatchers.IO) {
+        val safePage = page.coerceAtLeast(1)
+        val cacheKey = buildCacheKey(category.query, isLive = false, filter = filter, page = safePage)
+        val cached = wallpaperDao.getCachedWallpapers(cacheKey).map { it.toDomain() }
+        val rememberedTotal = seriesTotalCounts[category.query.lowercase()]
+            ?: seriesTotalCounts[category.title.lowercase()]
+            ?: 0
+        if (cached.isNotEmpty() && isCacheFreshAndEligible(
+                cacheKey = cacheKey,
+                query = category.query,
+                sort = filter.sort,
+                isLive = false,
+                forceRefresh = false,
+            )
+        ) {
+            val estimatedTotal = maxOf(rememberedTotal, safePage * cached.size)
+            val hasMore = if (rememberedTotal > 0) safePage * 24 < rememberedTotal else cached.size >= 18
+            return@withContext CollectionPageResult(
+                wallpapers = cached,
+                totalCount = estimatedTotal,
+                hasMore = hasMore,
+            )
+        }
+
+        val result = fetchWallhavenCategoryPage(
+            category = category,
+            filter = filter,
+            page = safePage,
+            cacheKey = cacheKey,
+        )
+        if (result.wallpapers.isNotEmpty()) {
+            return@withContext result
+        }
+        if (cached.isNotEmpty()) {
+            return@withContext CollectionPageResult(
+                wallpapers = cached,
+                totalCount = maxOf(rememberedTotal, cached.size),
+                hasMore = false,
+            )
+        }
+        CollectionPageResult(
+            wallpapers = emptyList(),
+            totalCount = rememberedTotal,
+            hasMore = false,
+        )
+    }
+
+    private suspend fun fetchWallhavenCategoryPage(
+        category: AnimeCategory,
+        filter: WallpaperFilter,
+        page: Int,
+        cacheKey: String,
+    ): CollectionPageResult {
+        return when (wallhavenRateLimiter.tryAcquire()) {
+            is WallhavenRateLimiter.AcquireResult.RateLimited -> {
+                CollectionPageResult(
+                    wallpapers = emptyList(),
+                    totalCount = seriesTotalCounts[category.query.lowercase()] ?: 0,
+                    hasMore = false,
+                )
+            }
+
+            WallhavenRateLimiter.AcquireResult.Allowed -> {
+                val outcome = safeApiCall("Wallhaven/CategoryPage") {
+                    wallhavenApi.searchAnime(
+                        query = category.query,
+                        categories = "010",
+                        purity = "100",
+                        ratios = filter.ratio.wallhavenRatios,
+                        atleast = null,
+                        sorting = "toplist",
+                        order = "desc",
+                        topRange = "1y",
+                        page = page,
+                    )
+                }
+                if (outcome is ApiCallOutcome.HttpFailure && outcome.code == 429) {
+                    wallhavenRateLimiter.recordServerRateLimit(outcome.retryAfterSeconds)
+                    return CollectionPageResult(
+                        wallpapers = emptyList(),
+                        totalCount = seriesTotalCounts[category.query.lowercase()] ?: 0,
+                        hasMore = false,
+                    )
+                }
+                val body = (outcome as? ApiCallOutcome.Success)?.response?.body()
+                val items = body?.data.orEmpty()
+                val metaTotal = body?.meta?.total ?: 0
+                val lastPage = body?.meta?.lastPage ?: page
+                if (metaTotal > 0) {
+                    seriesTotalCounts[category.query.lowercase()] = metaTotal
+                    seriesTotalCounts[category.title.lowercase()] = metaTotal
+                }
+                val mappedWallpapers = items.mapNotNull { item ->
+                    val safeImageUrl = sanitizeHttpsUrl(item.path) ?: return@mapNotNull null
+                    val safeThumbUrl = sanitizeHttpsUrl(item.thumbs.large)
+                        ?: sanitizeHttpsUrl(item.thumbs.original)
+                        ?: safeImageUrl
+                    AppWallpaper(
+                        id = "wh_${item.id}",
+                        title = "${category.title} • ${item.dimensionX}×${item.dimensionY}",
+                        animeSeries = category.title,
+                        imageUrl = safeImageUrl,
+                        thumbnailUrl = safeThumbUrl,
+                        videoUrl = null,
+                        isLive = false,
+                        width = item.dimensionX,
+                        height = item.dimensionY,
+                        source = "Wallhaven",
+                    )
+                }
+                if (mappedWallpapers.isNotEmpty()) {
+                    val now = clock()
+                    val cacheCat = CacheExpiryPolicy.resolveCategory(
+                        query = category.query,
+                        sort = filter.sort,
+                        isLive = false,
+                    )
+                    val ttlMillis = CacheExpiryPolicy.ttlMillisFor(
+                        query = category.query,
+                        sort = filter.sort,
+                        isLive = false,
+                    )
+                    wallpaperDao.replaceCacheForKey(
+                        cacheKey = cacheKey,
+                        items = mappedWallpapers.mapIndexed { idx, w ->
+                            w.toCacheEntity(cacheKey, idx, cacheCat, now)
+                        },
+                        timestampMillis = now,
+                        category = cacheCat,
+                        expiresAtMillis = now + ttlMillis,
+                    )
+                }
+                val resolvedTotal = maxOf(
+                    metaTotal,
+                    seriesTotalCounts[category.query.lowercase()] ?: 0,
+                    mappedWallpapers.size,
+                )
+                val hasMore = when {
+                    body?.meta != null -> page < lastPage
+                    else -> mappedWallpapers.size >= 18
+                }
+                CollectionPageResult(
+                    wallpapers = mappedWallpapers,
+                    totalCount = resolvedTotal,
+                    hasMore = hasMore,
+                )
+            }
+        }
     }
 
     suspend fun prefetchTrendingQueueBatch(
@@ -650,7 +1011,13 @@ class WallpaperRepository(
         val wallhavenOutcome = wallhavenTask.await()
         val rateLimited = localQuotaLimited ||
                 (wallhavenOutcome is ApiCallOutcome.HttpFailure && wallhavenOutcome.code == 429)
-        val wallhavenItems = (wallhavenOutcome as? ApiCallOutcome.Success)?.response?.body()?.data.orEmpty()
+        val wallhavenBody = (wallhavenOutcome as? ApiCallOutcome.Success)?.response?.body()
+        val wallhavenItems = wallhavenBody?.data.orEmpty()
+        val wallhavenMetaTotal = wallhavenBody?.meta?.total ?: 0
+        if (wallhavenMetaTotal > 0 && !isHomeTrending) {
+            seriesTotalCounts[query.lowercase()] = wallhavenMetaTotal
+            trendingTopic?.title?.lowercase()?.let { seriesTotalCounts[it] = wallhavenMetaTotal }
+        }
 
         // In queued multi-topic batches, only call Reddit as a fallback if Wallhaven is empty or rate-limited
         val fallbackRedditOutcome = if (skipRedditUnlessNeeded && page == 1 && (rateLimited || wallhavenItems.size < 4)) {
@@ -804,17 +1171,78 @@ class WallpaperRepository(
         page: Int,
         forceRefresh: Boolean = false,
     ): WallpaperFetchResult = coroutineScope {
-        val livePage = liveWallpaperDataSource.getLiveWallpapersPage(
-            query = query,
-            page = page,
-            pageSize = LiveWallpaperDataSource.DEFAULT_PAGE_SIZE,
-        )
-        if (livePage.items.isNotEmpty()) {
-            return@coroutineScope WallpaperFetchResult(
-                wallpapers = livePage.items,
-                isFromCache = false,
-                hasMore = livePage.hasMore,
+        if (liveWallpaperRepository != null) {
+            val r2PageResult = liveWallpaperRepository.getLiveWallpapersPage(
+                query = query,
+                page = page,
+                pageSize = LiveWallpaperRepository.DEFAULT_PAGE_SIZE,
+                forceRefresh = forceRefresh,
             )
+            r2PageResult.onSuccess { livePage ->
+                if (livePage.items.isNotEmpty()) {
+                    val now = clock()
+                    val category = CacheExpiryPolicy.resolveCategory(query = query, sort = filter.sort, isLive = true)
+                    val ttlMillis = CacheExpiryPolicy.ttlMillisFor(query = query, sort = filter.sort, isLive = true)
+                    wallpaperDao.replaceCacheForKey(
+                        cacheKey = cacheKey,
+                        items = livePage.items.mapIndexed { idx, w -> w.toCacheEntity(cacheKey, idx, category, now) },
+                        timestampMillis = now,
+                        category = category,
+                        expiresAtMillis = now + ttlMillis,
+                    )
+                    return@coroutineScope WallpaperFetchResult(
+                        wallpapers = livePage.items,
+                        isFromCache = false,
+                        hasMore = livePage.hasMore,
+                    )
+                }
+                if (page > 1 || livePage.totalCount > 0) {
+                    return@coroutineScope WallpaperFetchResult(
+                        wallpapers = emptyList(),
+                        isFromCache = false,
+                        hasMore = false,
+                        warningMessage = null,
+                    )
+                }
+                if (query == HOME_TRENDING_KEY) {
+                    runCatching { Log.w("LIVE_DEBUG", "R2 Live catalog returned 0 items for $query (page=$page)") }
+                    return@coroutineScope WallpaperFetchResult(
+                        wallpapers = staleCache.map { it.toDomain() },
+                        isFromCache = staleCache.isNotEmpty(),
+                        hasMore = false,
+                        warningMessage = if (staleCache.isNotEmpty()) {
+                            "Live catalog returned empty — showing cached live wallpapers."
+                        } else {
+                            "Live catalog returned 0 wallpapers. Verify live_wallpapers_v1.json on jsDelivr/GitHub."
+                        },
+                    )
+                }
+                // R2 catalog loaded cleanly but 0 live wallpapers matched this specific search keyword/tag.
+                return@coroutineScope WallpaperFetchResult(
+                    wallpapers = emptyList(),
+                    isFromCache = false,
+                    hasMore = false,
+                    warningMessage = null,
+                )
+            }.onFailure { err ->
+                runCatching {
+                    Log.e("LIVE_DEBUG", "R2 Live catalog fetch failed (query=$query, page=$page): ${err.message}", err)
+                }
+                if (staleCache.isNotEmpty()) {
+                    return@coroutineScope WallpaperFetchResult(
+                        wallpapers = staleCache.map { it.toDomain() },
+                        isFromCache = true,
+                        hasMore = false,
+                        warningMessage = "Offline mode — showing cached live wallpapers.",
+                    )
+                }
+                return@coroutineScope WallpaperFetchResult(
+                    wallpapers = emptyList(),
+                    isFromCache = false,
+                    hasMore = false,
+                    warningMessage = "Failed to load Live catalog (${err.javaClass.simpleName}: ${err.localizedMessage ?: "network error"}). Check Logcat LIVE_DEBUG.",
+                )
+            }
         }
 
         val isHomeTrending = query == HOME_TRENDING_KEY

@@ -25,10 +25,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
+import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.HighQuality
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.PlayCircleOutline
+import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.SupportAgent
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material3.AlertDialog
@@ -39,6 +42,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -47,9 +51,12 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,14 +84,31 @@ private val EMAIL_REGEX = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
 @Composable
 fun SettingsScreen(
     settings: UserSettings,
+    savedCount: Int = 0,
+    onOpenSaved: () -> Unit = {},
     onResolutionSelected: (ResolutionTier) -> Unit,
     onMuteLiveToggled: (Boolean) -> Unit,
     onOpenLiveWallpaperChooser: () -> Unit,
+    onClearDownloadedLiveVideos: () -> Unit = {},
     onSubmitWallpaperRequest: (email: String, content: String) -> Unit = { _, _ -> },
+    showPrivacyOptionsButton: Boolean = false,
+    onOpenPrivacyOptions: () -> Unit = {},
+    scrollToTopTick: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     var showRequestDialog by remember { mutableStateOf(false) }
     var showNotificationsDialog by remember { mutableStateOf(false) }
+    val scrollState = rememberScrollState()
+    var lastHandledScrollTick by rememberSaveable { mutableIntStateOf(scrollToTopTick) }
+
+    LaunchedEffect(scrollToTopTick) {
+        if (scrollToTopTick != lastHandledScrollTick) {
+            lastHandledScrollTick = scrollToTopTick
+            if (scrollState.value > 0) {
+                scrollState.animateScrollTo(0)
+            }
+        }
+    }
 
     if (showRequestDialog) {
         RequestWallpapersDialog(
@@ -106,7 +130,7 @@ fun SettingsScreen(
         modifier = modifier
             .fillMaxSize()
             .background(ObsidianVoid)
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -121,6 +145,80 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.headlineLarge,
                 color = InkWhite,
             )
+
+            // Saved Wallpapers Card (moved from Bottom Navigation into Settings)
+            Surface(
+                color = ObsidianSurfaceElevated,
+                shape = RoundedCornerShape(20.dp),
+                border = BorderStroke(1.dp, CrimsonBlade.copy(alpha = 0.40f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenSaved)
+                    .testTag("settings_saved_wallpapers_card"),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 72.dp)
+                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Surface(
+                            color = CrimsonBlade.copy(alpha = 0.16f),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Favorite,
+                                contentDescription = null,
+                                tint = CrimsonBlade,
+                                modifier = Modifier.padding(10.dp),
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = stringResource(id = R.string.settings_saved_title),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = InkWhite,
+                                )
+                                Surface(
+                                    color = CrimsonBlade.copy(alpha = 0.18f),
+                                    shape = RoundedCornerShape(50),
+                                ) {
+                                    Text(
+                                        text = stringResource(id = R.string.settings_saved_count, savedCount),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = CrimsonBlade,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = stringResource(id = R.string.settings_saved_subtitle),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = InkMuted,
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                        contentDescription = stringResource(id = R.string.settings_saved_title),
+                        tint = InkMuted,
+                    )
+                }
+            }
 
             // Resolution Quality Card (DataStore)
             Surface(
@@ -262,6 +360,27 @@ fun SettingsScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
+                    OutlinedButton(
+                        onClick = onClearDownloadedLiveVideos,
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, HairlineBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("clear_downloaded_live_videos_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DeleteSweep,
+                            contentDescription = null,
+                            tint = CyberCyan,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Clear Unused Live Video Cache", color = InkWhite)
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -388,6 +507,51 @@ fun SettingsScreen(
                             contentDescription = "Open Notifications popup",
                             tint = InkMuted,
                         )
+                    }
+
+                    if (showPrivacyOptionsButton) {
+                        HorizontalDivider(color = HairlineBorder)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 56.dp)
+                                .clickable(onClick = onOpenPrivacyOptions)
+                                .padding(vertical = 8.dp)
+                                .testTag("settings_privacy_options_row"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PrivacyTip,
+                                    contentDescription = null,
+                                    tint = ElectricViolet,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = stringResource(id = R.string.settings_ad_privacy_title),
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = InkWhite,
+                                    )
+                                    Text(
+                                        text = stringResource(id = R.string.settings_ad_privacy_subtitle),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = InkMuted,
+                                    )
+                                }
+                            }
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                contentDescription = stringResource(id = R.string.settings_ad_privacy_title),
+                                tint = InkMuted,
+                            )
+                        }
                     }
                 }
             }

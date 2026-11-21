@@ -1,6 +1,5 @@
 package com.example
 
-
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
@@ -37,12 +36,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Explore
-import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.GridView
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.rounded.Explore
-import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.GridView
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -61,8 +60,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -89,16 +90,20 @@ import com.example.ui.navigation.CategoriesRoute
 import com.example.ui.navigation.DetailRoute
 import com.example.ui.navigation.FavoritesRoute
 import com.example.ui.navigation.HomeRoute
+import com.example.ui.navigation.SearchRoute
 import com.example.ui.navigation.SettingsRoute
 import com.example.ui.navigation.SplashRoute
 import com.example.ui.screens.CategoriesScreen
 import com.example.ui.screens.DetailPreviewScreen
 import com.example.ui.screens.FavoritesScreen
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.SearchScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplashScreen
+import com.example.ui.state.FeedStatus
 import com.example.ui.state.MainViewModel
 import com.example.ui.state.UiEvent
+import kotlinx.coroutines.launch
 import com.example.ui.theme.CrimsonBlade
 import com.example.ui.theme.CrimsonContainer
 import com.example.ui.theme.CyberCyan
@@ -109,7 +114,6 @@ import com.example.ui.theme.ObsidianSurface
 import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.ObsidianVoid
 import com.example.util.LiveWallpaperHelper
-
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -126,14 +130,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-
 private data class TopLevelDestination(
     val route: Any,
     val labelRes: Int,
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector,
 )
-
 
 @Composable
 private fun KuroWallAppRoot(
@@ -151,11 +153,12 @@ private fun KuroWallAppRoot(
     val consentManager = appContainer.consentManager
     val interstitialAdManager = appContainer.interstitialAdManager
     val nativeAdManager = appContainer.nativeAdManager
-
+    val canRequestAds by consentManager.canRequestAds.collectAsStateWithLifecycle()
+    val isPrivacyOptionsRequired by consentManager.privacyOptionsRequired.collectAsStateWithLifecycle()
+    val coroutineScope = rememberCoroutineScope()
 
     var pendingLiveWallpaperComponent by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingLiveWallpaperTarget by rememberSaveable { mutableStateOf(WallpaperTarget.BOTH.name) }
-
 
     val liveWallpaperLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -176,7 +179,6 @@ private fun KuroWallAppRoot(
         }
     }
 
-
     fun launchAlternatingLiveWallpaperPicker(target: WallpaperTarget = WallpaperTarget.BOTH) {
         val targetComponent = LiveWallpaperHelper.getNextLiveWallpaperComponent(context)
         pendingLiveWallpaperComponent = targetComponent.flattenToString()
@@ -194,27 +196,24 @@ private fun KuroWallAppRoot(
         }
     }
 
-
     // Gather Google UMP GDPR/CCPA consent BEFORE initializing MobileAds and preloading ads.
-    LaunchedEffect(activity, consentManager, interstitialAdManager, nativeAdManager) {
+    // Native Ad buffer preload is deferred until Home/Categories feed is loaded to protect Show Rate.
+    LaunchedEffect(activity, consentManager, interstitialAdManager) {
         if (activity != null) {
             consentManager.gatherConsentAndInitializeAds(
                 activity = activity,
                 onAdsReady = {
                     interstitialAdManager.preload(context)
-                    nativeAdManager.preloadBuffer()
                 },
             )
         }
     }
-
 
     DisposableEffect(nativeAdManager) {
         onDispose {
             nativeAdManager.clearBuffer()
         }
     }
-
 
     LaunchedEffect(interstitialAdManager) {
         viewModel.events.collect { event ->
@@ -268,22 +267,30 @@ private fun KuroWallAppRoot(
         }
     }
 
-
     val topDestinations = remember {
         listOf(
             TopLevelDestination(HomeRoute, R.string.nav_home, Icons.Rounded.Explore, Icons.Outlined.Explore),
             TopLevelDestination(CategoriesRoute, R.string.nav_categories, Icons.Rounded.GridView, Icons.Outlined.GridView),
-            TopLevelDestination(FavoritesRoute, R.string.nav_favorites, Icons.Rounded.Favorite, Icons.Outlined.FavoriteBorder),
+            TopLevelDestination(SearchRoute, R.string.nav_search, Icons.Rounded.Search, Icons.Outlined.Search),
             TopLevelDestination(SettingsRoute, R.string.nav_settings, Icons.Rounded.Settings, Icons.Outlined.Settings),
         )
     }
 
-
     val isFullScreenRoute = currentDestination?.hasRoute<SplashRoute>() == true ||
             currentDestination?.hasRoute<DetailRoute>() == true
 
+    var homeScrollTopTick by rememberSaveable { mutableIntStateOf(0) }
+    var categoriesScrollTopTick by rememberSaveable { mutableIntStateOf(0) }
+    var searchScrollTopTick by rememberSaveable { mutableIntStateOf(0) }
+    var settingsScrollTopTick by rememberSaveable { mutableIntStateOf(0) }
 
     fun navigateTopLevel(route: Any) {
+        when (route) {
+            HomeRoute -> homeScrollTopTick++
+            CategoriesRoute -> categoriesScrollTopTick++
+            SearchRoute -> searchScrollTopTick++
+            SettingsRoute -> settingsScrollTopTick++
+        }
         navController.navigate(route) {
             popUpTo(navController.graph.findStartDestination().id) {
                 saveState = true
@@ -293,10 +300,8 @@ private fun KuroWallAppRoot(
         }
     }
 
-
     val configuration = LocalConfiguration.current
     val useNavigationRail = configuration.screenWidthDp >= 600 && !isFullScreenRoute
-
 
     Box(
         modifier = Modifier
@@ -345,7 +350,8 @@ private fun KuroWallAppRoot(
                             windowInsets = WindowInsets(0, 0, 0, 0),
                         ) {
                             topDestinations.forEach { dest ->
-                                val selected = currentDestination?.hasRoute(dest.route::class) == true
+                                val selected = currentDestination?.hasRoute(dest.route::class) == true ||
+                                        (dest.route == SettingsRoute && currentDestination?.hasRoute<FavoritesRoute>() == true)
                                 NavigationBarItem(
                                     selected = selected,
                                     onClick = { navigateTopLevel(dest.route) },
@@ -367,11 +373,12 @@ private fun KuroWallAppRoot(
                             }
                         }
 
-
-                        AdaptiveBannerAd(
-                            adUnitId = BuildConfig.ADMOB_BANNER_AD_UNIT_ID,
-                            topSafeMargin = 10.dp,
-                        )
+                        if (canRequestAds) {
+                            AdaptiveBannerAd(
+                                adUnitId = BuildConfig.ADMOB_BANNER_AD_UNIT_ID,
+                                topSafeMargin = 10.dp,
+                            )
+                        }
                     }
                 }
             },
@@ -386,7 +393,8 @@ private fun KuroWallAppRoot(
                         containerColor = ObsidianSurface,
                     ) {
                         topDestinations.forEach { dest ->
-                            val selected = currentDestination?.hasRoute(dest.route::class) == true
+                            val selected = currentDestination?.hasRoute(dest.route::class) == true ||
+                                    (dest.route == SettingsRoute && currentDestination?.hasRoute<FavoritesRoute>() == true)
                             NavigationRailItem(
                                 selected = selected,
                                 onClick = { navigateTopLevel(dest.route) },
@@ -408,7 +416,6 @@ private fun KuroWallAppRoot(
                         }
                     }
                 }
-
 
                 Column(modifier = Modifier.weight(1f).fillMaxSize()) {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -438,7 +445,6 @@ private fun KuroWallAppRoot(
                                 )
                             }
 
-
                             composable<HomeRoute>(
                                 enterTransition = {
                                     if (initialState.destination.hasRoute<SplashRoute>()) {
@@ -454,11 +460,19 @@ private fun KuroWallAppRoot(
                             ) {
                                 val homeState by viewModel.homeState.collectAsStateWithLifecycle()
                                 val favoriteIdsState = viewModel.favoriteIds.collectAsStateWithLifecycle()
+                                val homeFeedReady = (homeState.feedStatus as? FeedStatus.Success)
+                                    ?.items?.isNotEmpty() == true
+                                LaunchedEffect(canRequestAds, homeFeedReady, nativeAdManager) {
+                                    if (canRequestAds && homeFeedReady) {
+                                        nativeAdManager.preloadBuffer()
+                                    }
+                                }
                                 HomeScreen(
                                     uiState = homeState,
                                     favoriteIdsState = favoriteIdsState,
                                     onSearchInputChange = viewModel::onSearchInputChange,
                                     onSubmitSearch = { viewModel.submitSearch() },
+                                    onSelectSuggestion = { query -> viewModel.submitSearch(query) },
                                     onSelectTrendingTopic = viewModel::selectTrendingTopic,
                                     onSelectTab = viewModel::selectTab,
                                     onApplyFilter = viewModel::applyFilter,
@@ -473,25 +487,56 @@ private fun KuroWallAppRoot(
                                         )
                                     },
                                     onToggleFavorite = viewModel::toggleFavorite,
+                                    scrollToTopTick = homeScrollTopTick,
                                 )
                             }
-
 
                             composable<CategoriesRoute> {
                                 val categories by viewModel.filteredCategories.collectAsStateWithLifecycle()
                                 val categoryFilterText by viewModel.categoryFilterText.collectAsStateWithLifecycle()
+                                val categoryPreviews by viewModel.animeCategoryPreviews.collectAsStateWithLifecycle()
                                 CategoriesScreen(
                                     categories = categories,
                                     filterText = categoryFilterText,
+                                    categoryPreviews = categoryPreviews,
                                     onFilterChange = viewModel::updateCategorySearch,
-                                    onCategoryClick = { category ->
-                                        viewModel.selectAnimeCategory(category)
-                                        navigateTopLevel(HomeRoute)
+                                    onVisibleCategoriesChanged = viewModel::requestAnimeCategoryPreviews,
+                                    onOpenCategoryDetail = { category, startIndex ->
+                                        viewModel.openAnimeCategoryInDetail(category)
+                                        navController.navigate(
+                                            DetailRoute(
+                                                startIndex = startIndex,
+                                                feedSource = DetailRoute.FEED_COLLECTION,
+                                            ),
+                                        )
                                     },
+                                    scrollToTopTick = categoriesScrollTopTick,
                                     nativeAdManager = nativeAdManager,
                                 )
                             }
 
+                            composable<SearchRoute> {
+                                val liveFacets by viewModel.searchLiveFacets.collectAsStateWithLifecycle()
+                                val trendingBanners by viewModel.searchTrendingBanners.collectAsStateWithLifecycle()
+                                val searchCategoryCovers by viewModel.searchCategoryCovers.collectAsStateWithLifecycle()
+                                SearchScreen(
+                                    liveFacets = liveFacets,
+                                    trendingBanners = trendingBanners,
+                                    categoryCovers = searchCategoryCovers,
+                                    onComputeSuggestions = viewModel::getUnifiedSearchSuggestions,
+                                    onSearchSubmit = { query, isColorSearch, preferLive ->
+                                        viewModel.searchFromSearchScreen(
+                                            query = query,
+                                            isColorSearch = isColorSearch,
+                                            preferLive = preferLive,
+                                        )
+                                        navigateTopLevel(HomeRoute)
+                                    },
+                                    onScreenEntered = viewModel::onSearchScreenEntered,
+                                    scrollToTopTick = searchScrollTopTick,
+                                    nativeAdManager = nativeAdManager,
+                                )
+                            }
 
                             composable<FavoritesRoute> {
                                 val favorites by viewModel.favorites.collectAsStateWithLifecycle()
@@ -507,14 +552,21 @@ private fun KuroWallAppRoot(
                                     },
                                     onToggleFavorite = viewModel::toggleFavorite,
                                     onExploreClick = { navigateTopLevel(HomeRoute) },
+                                    onBack = { navController.popBackStack() },
                                 )
                             }
 
-
                             composable<SettingsRoute> {
                                 val settings by viewModel.settings.collectAsStateWithLifecycle()
+                                val favorites by viewModel.favorites.collectAsStateWithLifecycle()
                                 SettingsScreen(
                                     settings = settings,
+                                    savedCount = favorites.size,
+                                    onOpenSaved = {
+                                        navController.navigate(FavoritesRoute) {
+                                            launchSingleTop = true
+                                        }
+                                    },
                                     onResolutionSelected = viewModel::updatePreferredResolution,
                                     onMuteLiveToggled = viewModel::setMuteLiveWallpaper,
                                     onOpenLiveWallpaperChooser = {
@@ -530,10 +582,26 @@ private fun KuroWallAppRoot(
                                             navigateTopLevel(HomeRoute)
                                         }
                                     },
+                                    onClearDownloadedLiveVideos = viewModel::clearDownloadedLiveVideos,
                                     onSubmitWallpaperRequest = viewModel::submitWallpaperRequest,
+                                    showPrivacyOptionsButton = isPrivacyOptionsRequired || consentManager.isPrivacyOptionsRequired,
+                                    onOpenPrivacyOptions = {
+                                        activity?.let { act ->
+                                            consentManager.showPrivacyOptionsForm(act) { formError ->
+                                                if (formError != null) {
+                                                    coroutineScope.launch {
+                                                        snackbarHostState.showSnackbar(
+                                                            message = context.getString(R.string.settings_ad_privacy_error),
+                                                            duration = SnackbarDuration.Short,
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    scrollToTopTick = settingsScrollTopTick,
                                 )
                             }
-
 
                             composable<DetailRoute>(
                                 enterTransition = {
@@ -553,10 +621,13 @@ private fun KuroWallAppRoot(
                             ) { entry ->
                                 val route = entry.toRoute<DetailRoute>()
                                 val homeState by viewModel.homeState.collectAsStateWithLifecycle()
+                                val collectionDetailState by viewModel.collectionDetailState.collectAsStateWithLifecycle()
                                 val favorites by viewModel.favorites.collectAsStateWithLifecycle()
                                 val favoriteIdsState = viewModel.favoriteIds.collectAsStateWithLifecycle()
                                 val settings by viewModel.settings.collectAsStateWithLifecycle()
-                                val feed = remember(route.feedSource, homeState.feedStatus, favorites) {
+                                val isCollectionSource = route.feedSource == DetailRoute.FEED_COLLECTION
+                                val isMainSource = route.feedSource == DetailRoute.FEED_MAIN
+                                val feed = remember(route.feedSource, homeState.feedStatus, collectionDetailState.items, favorites) {
                                     viewModel.getCurrentFeedList(route.feedSource)
                                 }
                                 DetailPreviewScreen(
@@ -580,11 +651,29 @@ private fun KuroWallAppRoot(
                                     onDetailImageViewed = { wallpaperId ->
                                         interstitialAdManager.onDetailImageViewed(wallpaperId)
                                     },
+                                    totalCountHint = if (isCollectionSource) collectionDetailState.totalCount else null,
+                                    isLoadingFeed = isCollectionSource && collectionDetailState.isLoadingInitial,
+                                    hasMore = when {
+                                        isCollectionSource -> collectionDetailState.hasMore
+                                        isMainSource -> homeState.hasMore
+                                        else -> false
+                                    },
+                                    isLoadingMore = when {
+                                        isCollectionSource -> collectionDetailState.isLoadingMore
+                                        isMainSource -> homeState.isLoadingMore
+                                        else -> false
+                                    },
+                                    onLoadMore = {
+                                        when {
+                                            isCollectionSource -> viewModel.loadMoreCollectionDetail()
+                                            isMainSource -> viewModel.loadMore()
+                                        }
+                                    },
                                 )
                             }
                         }
                     }
-                    if (!isFullScreenRoute && useNavigationRail) {
+                    if (!isFullScreenRoute && useNavigationRail && canRequestAds) {
                         AdaptiveBannerAd(
                             adUnitId = BuildConfig.ADMOB_BANNER_AD_UNIT_ID,
                             topSafeMargin = 10.dp,
@@ -594,14 +683,12 @@ private fun KuroWallAppRoot(
             }
         }
 
-
         RateLimitBreatherHost(
             viewModel = viewModel,
             isSplashRoute = currentDestination?.hasRoute<SplashRoute>() == true,
         )
     }
 }
-
 
 @Composable
 private fun RateLimitBreatherHost(
@@ -618,3 +705,4 @@ private fun RateLimitBreatherHost(
         }
     }
 }
+

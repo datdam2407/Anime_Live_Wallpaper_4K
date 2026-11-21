@@ -54,7 +54,6 @@ import com.example.ui.theme.ObsidianSurface
 import com.example.ui.theme.ObsidianSurfaceElevated
 import kotlinx.coroutines.delay
 
-
 /**
  * Fun anime trivia breather dialog shown when the user hits the 40th Wallhaven request
  * inside a 60-second window, naturally stalling for a few seconds to prevent HTTP 429 blocks.
@@ -67,7 +66,6 @@ fun RateLimitBreatherDialog(
     val totalSeconds = prompt.breatherSeconds.coerceAtLeast(1)
     var remainingSeconds by remember(prompt.id) { mutableIntStateOf(totalSeconds) }
 
-
     LaunchedEffect(prompt.id) {
         remainingSeconds = totalSeconds
         while (remainingSeconds > 0) {
@@ -76,7 +74,6 @@ fun RateLimitBreatherDialog(
         }
     }
 
-
     val canDismiss = remainingSeconds <= 0
     val progressTarget = (totalSeconds - remainingSeconds).toFloat() / totalSeconds.toFloat()
     val animatedProgress by animateFloatAsState(
@@ -84,7 +81,6 @@ fun RateLimitBreatherDialog(
         animationSpec = tween(durationMillis = 900, easing = LinearEasing),
         label = "breather_progress",
     )
-
 
     Dialog(
         onDismissRequest = {
@@ -140,9 +136,7 @@ fun RateLimitBreatherDialog(
                     )
                 }
 
-
                 Spacer(modifier = Modifier.height(12.dp))
-
 
                 Surface(
                     color = CyberCyan.copy(alpha = 0.14f),
@@ -161,9 +155,7 @@ fun RateLimitBreatherDialog(
                     }
                 }
 
-
                 Spacer(modifier = Modifier.height(14.dp))
-
 
                 Text(
                     text = prompt.headline,
@@ -172,9 +164,7 @@ fun RateLimitBreatherDialog(
                     textAlign = TextAlign.Center,
                 )
 
-
                 Spacer(modifier = Modifier.height(10.dp))
-
 
                 Text(
                     text = prompt.funFact,
@@ -183,9 +173,7 @@ fun RateLimitBreatherDialog(
                     textAlign = TextAlign.Center,
                 )
 
-
                 Spacer(modifier = Modifier.height(18.dp))
-
 
                 LinearProgressIndicator(
                     progress = { animatedProgress },
@@ -197,9 +185,7 @@ fun RateLimitBreatherDialog(
                         .clip(RoundedCornerShape(50)),
                 )
 
-
                 Spacer(modifier = Modifier.height(18.dp))
-
 
                 Button(
                     onClick = onDismiss,

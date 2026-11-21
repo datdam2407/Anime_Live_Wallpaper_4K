@@ -1,9 +1,10 @@
 package com.example.ui.screens
 
-import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import androidx.compose.foundation.Image
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,9 +26,11 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
@@ -37,70 +41,135 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import coil.size.Precision
+import coil.size.Scale
 import com.example.KuroWallApplication
-import com.kuroanimelivewallpapers.app.R
 import com.example.ads.CategoryGridEntry
 import com.example.ads.NativeAdCard
 import com.example.ads.NativeAdManager
 import com.example.ads.NativeAdStyle
 import com.example.ads.buildCategoriesWithProgressiveAds
 import com.example.domain.model.AnimeCategory
+import com.example.domain.model.AnimeSeriesPreview
 import com.example.ui.theme.CrimsonBlade
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.InkMuted
 import com.example.ui.theme.InkWhite
+import com.example.ui.theme.ObsidianSurface
 import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.ObsidianVoid
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 /**
- * Displays all 200 curated anime series with zero automatic network API calls during scroll
- * to protect the Wallhaven 45 req/min rate limit. API search executes only when user taps a series.
+ * Displays all 200 curated anime series in collection-row format:
+ * each row shows the anime title above a 4-panel portrait wallpaper strip,
+ * with the 4th panel displaying the remaining count (+N) when more than 4 wallpapers exist.
+ * Only currently visible rows trigger throttled, cache-first preview loads.
  */
 @Composable
 fun CategoriesScreen(
     categories: List<AnimeCategory>,
     filterText: String,
+    categoryPreviews: Map<String, AnimeSeriesPreview> = emptyMap(),
     onFilterChange: (String) -> Unit,
-    onCategoryClick: (AnimeCategory) -> Unit,
+    onVisibleCategoriesChanged: (List<AnimeCategory>) -> Unit = {},
+    onOpenCategoryDetail: (category: AnimeCategory, startIndex: Int) -> Unit,
+    scrollToTopTick: Int = 0,
     modifier: Modifier = Modifier,
     nativeAdManager: NativeAdManager? = null,
 ) {
     val context = LocalContext.current
-    val resolvedAdManager = remember(context, nativeAdManager) {
-        nativeAdManager ?: (context.applicationContext as? KuroWallApplication)?.container?.nativeAdManager
-    }
-    val gridEntries = remember(categories) {
-        buildCategoriesWithProgressiveAds(categories)
-    }
-    // Pre-blur the shared cover bitmap once off the main thread instead of running
-    // Modifier.blur() GPU passes on 200 grid cards during scroll.
-    val blurredCover by produceState<ImageBitmap?>(initialValue = null, key1 = context) {
-        value = withContext(Dispatchers.Default) {
-            createBlurredCategoryCover(context)
+    val gridState = rememberLazyGridState()
+    var lastHandledScrollTick by rememberSaveable { mutableIntStateOf(scrollToTopTick) }
+    var lastHandledFilterText by rememberSaveable { mutableStateOf(filterText) }
+
+    LaunchedEffect(scrollToTopTick) {
+        if (scrollToTopTick != lastHandledScrollTick) {
+            lastHandledScrollTick = scrollToTopTick
+            if (gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0) {
+                if (gridState.firstVisibleItemIndex <= 8) {
+                    gridState.animateScrollToItem(0)
+                } else {
+                    gridState.scrollToItem(0, 0)
+                }
+            }
         }
     }
 
-    LaunchedEffect(resolvedAdManager) {
-        resolvedAdManager?.preloadBuffer()
+    LaunchedEffect(filterText) {
+        if (filterText != lastHandledFilterText) {
+            lastHandledFilterText = filterText
+            if (gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0) {
+                gridState.scrollToItem(0, 0)
+            }
+        }
+    }
+    val resolvedAdManager = remember(context, nativeAdManager) {
+        nativeAdManager ?: (context.applicationContext as? KuroWallApplication)?.container?.nativeAdManager
+    }
+    val consentManager = remember(context) {
+        (context.applicationContext as? KuroWallApplication)?.container?.consentManager
+    }
+    val canRequestAds = consentManager?.canRequestAds?.collectAsStateWithLifecycle()?.value ?: true
+    val gridEntries = remember(categories) {
+        buildCategoriesWithProgressiveAds(categories)
+    }
+
+    LaunchedEffect(resolvedAdManager, canRequestAds, categories.isNotEmpty()) {
+        if (canRequestAds && categories.isNotEmpty()) {
+            resolvedAdManager?.preloadBuffer()
+        }
+    }
+
+    // Observe visible viewport rows (plus 2 lookahead) with debounce to load 4-panel previews safely.
+    LaunchedEffect(gridState, gridEntries) {
+        snapshotFlow {
+            val visibleIndices = gridState.layoutInfo.visibleItemsInfo.map { it.index }
+            if (visibleIndices.isEmpty()) {
+                gridEntries.filterIsInstance<CategoryGridEntry.CategoryItem>()
+                    .take(6)
+                    .map { it.category }
+            } else {
+                val first = visibleIndices.min()
+                val last = (visibleIndices.max() + 2).coerceAtMost(gridEntries.lastIndex)
+                (first..last).mapNotNull { idx ->
+                    (gridEntries.getOrNull(idx) as? CategoryGridEntry.CategoryItem)?.category
+                }
+            }
+        }
+            .distinctUntilChanged()
+            .collectLatest { visibleCategories ->
+                if (visibleCategories.isNotEmpty()) {
+                    delay(140L)
+                    onVisibleCategoriesChanged(visibleCategories)
+                }
+            }
     }
 
     BoxWithConstraints(
@@ -108,11 +177,7 @@ fun CategoriesScreen(
             .fillMaxSize()
             .background(ObsidianVoid),
     ) {
-        val columnCount = when {
-            maxWidth >= 840.dp -> 4
-            maxWidth >= 600.dp -> 3
-            else -> 2
-        }
+        val columnCount = if (maxWidth >= 840.dp) 2 else 1
 
         Column(modifier = Modifier.fillMaxSize()) {
             Column(
@@ -184,7 +249,7 @@ fun CategoriesScreen(
                     if (filterText.isNotEmpty()) {
                         IconButton(
                             onClick = { onFilterChange("") },
-                            modifier = Modifier.size(32.dp),
+                            modifier = Modifier.size(48.dp),
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Close,
@@ -198,10 +263,11 @@ fun CategoriesScreen(
             }
 
             LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Fixed(columnCount),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag("categories_grid"),
@@ -223,10 +289,12 @@ fun CategoriesScreen(
                 ) { _, entry ->
                     when (entry) {
                         is CategoryGridEntry.CategoryItem -> {
-                            AnimeCategoryCard(
+                            AnimeCollectionStripRow(
                                 category = entry.category,
-                                blurredCover = blurredCover,
-                                onClick = { onCategoryClick(entry.category) },
+                                preview = categoryPreviews[entry.category.id],
+                                onTileClick = { tileIndex ->
+                                    onOpenCategoryDetail(entry.category, tileIndex)
+                                },
                             )
                         }
 
@@ -246,160 +314,151 @@ fun CategoriesScreen(
 }
 
 @Composable
-private fun AnimeCategoryCard(
+private fun AnimeCollectionStripRow(
     category: AnimeCategory,
-    blurredCover: ImageBitmap?,
-    onClick: () -> Unit,
+    preview: AnimeSeriesPreview?,
+    onTileClick: (Int) -> Unit,
 ) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
     val accentColor = Color(category.accentHex)
-    val shape = RoundedCornerShape(20.dp)
+    val tileWidthPx = remember(density) { with(density) { 120.dp.roundToPx() } }
+    val tileHeightPx = remember(density) { with(density) { 210.dp.roundToPx() } }
+    val thumbnails = preview?.thumbnailUrls.orEmpty()
+    val remainingBadge = preview?.formatRemainingBadge()
+    val isLoading = preview == null || (preview.isLoading && thumbnails.isEmpty())
 
-    Box(
+    val shimmerAlpha = if (isLoading) {
+        val transition = rememberInfiniteTransition(label = "category_strip_shimmer")
+        transition.animateFloat(
+            initialValue = 0.28f,
+            targetValue = 0.62f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 900),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "shimmer_alpha",
+        ).value
+    } else {
+        0.35f
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(132.dp)
-            .clip(shape)
-            .background(ObsidianSurfaceElevated)
-            .border(1.dp, accentColor.copy(alpha = 0.38f), shape)
-            .clickable(onClick = onClick)
             .testTag("category_card_${category.id}"),
-        contentAlignment = Alignment.Center,
     ) {
-        // Shared pre-blurred cover bitmap — zero GPU blur passes and zero API calls on scroll
-        if (blurredCover != null) {
-            Image(
-                bitmap = blurredCover,
-                contentDescription = "${category.title} stylized cover",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
+        // Anime title header — tapping opens DetailPreviewScreen starting at photo #1
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .clickable { onTileClick(0) }
+                .padding(top = 2.dp, bottom = 8.dp, start = 2.dp, end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = category.title,
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                ),
+                color = InkWhite,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = "Open ${category.title} collection",
+                tint = InkMuted,
+                modifier = Modifier.size(20.dp),
             )
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.linearGradient(
-                        colors = listOf(
-                            ObsidianVoid.copy(alpha = 0.78f),
-                            accentColor.copy(alpha = 0.28f),
-                            ObsidianVoid.copy(alpha = 0.84f),
-                        ),
-                    ),
-                ),
-        )
-
-        Text(
-            text = category.title,
-            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-            color = InkWhite,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
+        // 4-panel seamless portrait strip — tapping any tile opens DetailPreviewScreen at that exact photo
+        val stripShape = RoundedCornerShape(14.dp)
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp),
-        )
-    }
-}
+                .height(176.dp)
+                .clip(stripShape)
+                .background(ObsidianSurface)
+                .border(1.dp, HairlineBorder.copy(alpha = 0.7f), stripShape),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            for (slotIndex in 0 until 4) {
+                val thumbUrl = thumbnails.getOrNull(slotIndex)
+                val isLastSlot = slotIndex == 3
+                val targetIndex = if (thumbnails.isNotEmpty()) {
+                    slotIndex.coerceAtMost(thumbnails.lastIndex)
+                } else {
+                    slotIndex
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    ObsidianSurfaceElevated,
+                                    accentColor.copy(alpha = shimmerAlpha * (0.28f + slotIndex * 0.06f)),
+                                    ObsidianVoid,
+                                ),
+                            ),
+                        )
+                        .clickable { onTileClick(targetIndex) }
+                        .testTag("category_tile_${category.id}_$slotIndex"),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (!thumbUrl.isNullOrBlank()) {
+                        val request = remember(thumbUrl, tileWidthPx, tileHeightPx) {
+                            ImageRequest.Builder(context)
+                                .data(thumbUrl)
+                                .size(tileWidthPx, tileHeightPx)
+                                .precision(Precision.INEXACT)
+                                .scale(Scale.FILL)
+                                .memoryCachePolicy(CachePolicy.ENABLED)
+                                .diskCachePolicy(CachePolicy.ENABLED)
+                                .allowHardware(true)
+                                .crossfade(220)
+                                .build()
+                        }
+                        AsyncImage(
+                            model = request,
+                            contentDescription = "${category.title} wallpaper ${slotIndex + 1}",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
 
-private fun createBlurredCategoryCover(context: Context): ImageBitmap? {
-    val options = BitmapFactory.Options().apply {
-        inSampleSize = 4
-        inPreferredConfig = Bitmap.Config.ARGB_8888
-    }
-    val decoded = BitmapFactory.decodeResource(
-        context.resources,
-        R.drawable.img_hero_anime_night,
-        options,
-    ) ?: return null
-
-    val targetW = 128
-    val targetH = 80
-    val scaled = if (decoded.width != targetW || decoded.height != targetH) {
-        Bitmap.createScaledBitmap(decoded, targetW, targetH, true).also {
-            if (it !== decoded) decoded.recycle()
-        }
-    } else {
-        decoded
-    }
-
-    val blurred = fastBoxBlur(scaled, radius = 4, passes = 2)
-    if (blurred !== scaled) scaled.recycle()
-    return blurred.asImageBitmap()
-}
-
-private fun fastBoxBlur(source: Bitmap, radius: Int, passes: Int): Bitmap {
-    val w = source.width
-    val h = source.height
-    if (w <= 0 || h <= 0 || radius <= 0) return source
-
-    val total = w * h
-    var src = IntArray(total)
-    var dst = IntArray(total)
-    source.getPixels(src, 0, w, 0, 0, w, h)
-
-    val windowSize = radius * 2 + 1
-    repeat(passes) {
-        // Horizontal pass
-        for (y in 0 until h) {
-            val rowOffset = y * w
-            var aSum = 0
-            var rSum = 0
-            var gSum = 0
-            var bSum = 0
-            for (dx in -radius..radius) {
-                val px = src[rowOffset + dx.coerceIn(0, w - 1)]
-                aSum += (px ushr 24) and 0xFF
-                rSum += (px ushr 16) and 0xFF
-                gSum += (px ushr 8) and 0xFF
-                bSum += px and 0xFF
-            }
-            for (x in 0 until w) {
-                dst[rowOffset + x] =
-                    ((aSum / windowSize) shl 24) or
-                            ((rSum / windowSize) shl 16) or
-                            ((gSum / windowSize) shl 8) or
-                            (bSum / windowSize)
-
-                val outPx = src[rowOffset + (x - radius).coerceIn(0, w - 1)]
-                val inPx = src[rowOffset + (x + radius + 1).coerceIn(0, w - 1)]
-                aSum += ((inPx ushr 24) and 0xFF) - ((outPx ushr 24) and 0xFF)
-                rSum += ((inPx ushr 16) and 0xFF) - ((outPx ushr 16) and 0xFF)
-                gSum += ((inPx ushr 8) and 0xFF) - ((outPx ushr 8) and 0xFF)
-                bSum += (inPx and 0xFF) - (outPx and 0xFF)
-            }
-        }
-
-        // Vertical pass
-        for (x in 0 until w) {
-            var aSum = 0
-            var rSum = 0
-            var gSum = 0
-            var bSum = 0
-            for (dy in -radius..radius) {
-                val px = dst[dy.coerceIn(0, h - 1) * w + x]
-                aSum += (px ushr 24) and 0xFF
-                rSum += (px ushr 16) and 0xFF
-                gSum += (px ushr 8) and 0xFF
-                bSum += px and 0xFF
-            }
-            for (y in 0 until h) {
-                src[y * w + x] =
-                    ((aSum / windowSize) shl 24) or
-                            ((rSum / windowSize) shl 16) or
-                            ((gSum / windowSize) shl 8) or
-                            (bSum / windowSize)
-
-                val outPx = dst[(y - radius).coerceIn(0, h - 1) * w + x]
-                val inPx = dst[(y + radius + 1).coerceIn(0, h - 1) * w + x]
-                aSum += ((inPx ushr 24) and 0xFF) - ((outPx ushr 24) and 0xFF)
-                rSum += ((inPx ushr 16) and 0xFF) - ((outPx ushr 16) and 0xFF)
-                gSum += ((inPx ushr 8) and 0xFF) - ((outPx ushr 8) and 0xFF)
-                bSum += (inPx and 0xFF) - (outPx and 0xFF)
+                    // 4th tile overlay displaying remaining count (+116, +22, +1.2K, etc.)
+                    if (isLastSlot && remainingBadge != null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(ObsidianVoid.copy(alpha = 0.56f))
+                                .testTag("category_remaining_${category.id}"),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = remainingBadge,
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = (-0.2).sp,
+                                ),
+                                color = InkWhite,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
-
-    return Bitmap.createBitmap(src, w, h, Bitmap.Config.ARGB_8888)
 }

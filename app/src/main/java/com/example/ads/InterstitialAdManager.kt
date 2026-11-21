@@ -1,6 +1,5 @@
 package com.example.ads
 
-
 import android.app.Activity
 import android.content.Context
 import android.os.SystemClock
@@ -12,7 +11,7 @@ import com.google.android.gms.ads.LoadAdError
 import com.google.android.gms.ads.interstitial.InterstitialAd
 import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
 import com.kuroanimelivewallpapers.app.BuildConfig
-
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Policy-compliant AdMob Interstitial Manager:
@@ -33,22 +32,17 @@ class InterstitialAdManager(
         private const val TAG = "InterstitialAdManager"
     }
 
-
     private var interstitialAd: InterstitialAd? = null
     private var isLoading: Boolean = false
     private var lastAdShownAtMs: Long? = null
 
-
     var detailViewCount: Int = 0
         private set
-
 
     var hasAppliedWallpaper: Boolean = false
         private set
 
-
     private var lastViewedWallpaperId: String? = null
-
 
     /**
      * Pre-loads an interstitial ad in the background if one is not already loaded or loading.
@@ -58,9 +52,7 @@ class InterstitialAdManager(
         val safeContext = context?.applicationContext ?: return
         isLoading = true
 
-
         val adRequest = AdRequest.Builder().build()
-
 
         runCatching {
             InterstitialAd.load(
@@ -73,7 +65,6 @@ class InterstitialAdManager(
                         interstitialAd = ad
                         logD("Test Interstitial preloaded and ready")
                     }
-
 
                     override fun onAdFailedToLoad(error: LoadAdError) {
                         isLoading = false
@@ -88,7 +79,6 @@ class InterstitialAdManager(
         }
     }
 
-
     /**
      * Returns true strictly if no ad has been shown yet OR >= 200 seconds have passed since last ad.
      */
@@ -97,13 +87,11 @@ class InterstitialAdManager(
         return (nowMs - lastShown) >= cooldownMillis
     }
 
-
     fun remainingCooldownSeconds(nowMs: Long = clockMillis()): Long {
         val lastShown = lastAdShownAtMs ?: return 0L
         val elapsed = nowMs - lastShown
         return ((cooldownMillis - elapsed).coerceAtLeast(0L) + 999L) / 1000L
     }
-
 
     /**
      * Records Condition A: distinct detail image viewed (deduplicated for same consecutive ID).
@@ -116,7 +104,6 @@ class InterstitialAdManager(
         }
     }
 
-
     /**
      * Records Condition B: user successfully applied a static or live wallpaper.
      * Never triggers an ad immediately; evaluated only when clicking Back to leave Detail.
@@ -124,7 +111,6 @@ class InterstitialAdManager(
     fun markWallpaperApplied() {
         hasAppliedWallpaper = true
     }
-
 
     /**
      * Evaluates Condition A (>= 8 detail views) OR Condition B (wallpaper applied) strictly
@@ -137,7 +123,6 @@ class InterstitialAdManager(
     ) {
         val metViewThreshold = detailViewCount >= AdMobConstants.DETAIL_VIEW_BACK_THRESHOLD
         val metWallpaperApplied = hasAppliedWallpaper
-
 
         if (metViewThreshold || metWallpaperApplied) {
             val triggerName = if (metWallpaperApplied) {
@@ -160,7 +145,6 @@ class InterstitialAdManager(
         }
     }
 
-
     internal fun showIfEligible(
         activity: Activity?,
         triggerName: String,
@@ -168,12 +152,11 @@ class InterstitialAdManager(
     ): Boolean {
         val nowMs = clockMillis()
         if (!canShowAd(nowMs)) {
-            logD("Blocked 'triggerName':cooldownactive({remainingCooldownSeconds(nowMs)}s remaining)")
+            logD("Blocked '$triggerName': cooldown active (${remainingCooldownSeconds(nowMs)}s remaining)")
             preload(appContext)
             onComplete()
             return false
         }
-
 
         val ad = interstitialAd
         if (ad == null || activity == null || activity.isFinishing || activity.isDestroyed) {
@@ -183,48 +166,54 @@ class InterstitialAdManager(
             return false
         }
 
-
         interstitialAd = null
         lastAdShownAtMs = nowMs
 
+        val completionFired = AtomicBoolean(false)
+        val completeOnce = {
+            if (completionFired.compareAndSet(false, true)) {
+                onComplete()
+            }
+        }
 
         ad.fullScreenContentCallback = object : FullScreenContentCallback() {
             override fun onAdShowedFullScreenContent() {
                 lastAdShownAtMs = clockMillis()
             }
 
-
             override fun onAdDismissedFullScreenContent() {
                 ad.fullScreenContentCallback = null
                 lastAdShownAtMs = clockMillis()
                 preload(appContext)
-                onComplete()
+                completeOnce()
             }
-
 
             override fun onAdFailedToShowFullScreenContent(adError: AdError) {
                 ad.fullScreenContentCallback = null
                 logW("Failed to show interstitial: ${adError.message}")
                 preload(appContext)
-                onComplete()
+                completeOnce()
             }
         }
 
-
-        ad.show(activity)
-        return true
+        val shown = runCatching {
+            ad.show(activity)
+        }.onFailure { err ->
+            ad.fullScreenContentCallback = null
+            logW("Unexpected error showing interstitial: ${err.message}")
+            preload(appContext)
+            completeOnce()
+        }.isSuccess
+        return shown
     }
-
 
     private fun logD(message: String) {
         runCatching { Log.d(TAG, message) }
     }
 
-
     private fun logW(message: String) {
         runCatching { Log.w(TAG, message) }
     }
-
 
     internal fun markShownNowForTest() {
         lastAdShownAtMs = clockMillis()

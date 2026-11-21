@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.util.Log
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -65,6 +66,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kuroanimelivewallpapers.app.R
@@ -167,6 +169,7 @@ fun WallpaperStaggeredCard(
     val density = LocalDensity.current
     var isLoading by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableStateOf(true) }
     var useVideoFrameFallback by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableStateOf(false) }
+    var fallbackFailed by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableStateOf(false) }
 
     BoxWithConstraints(
         modifier = modifier
@@ -186,8 +189,9 @@ fun WallpaperStaggeredCard(
     ) {
         val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(240, 960) }
         val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(320, 1280) }
-        val activeUrl = if (useVideoFrameFallback && !wallpaper.videoUrl.isNullOrBlank()) {
-            wallpaper.videoUrl
+        val fallbackPreviewUrl = wallpaper.effectivePreviewVideoUrl
+        val activeUrl = if (useVideoFrameFallback && !fallbackPreviewUrl.isNullOrBlank()) {
+            fallbackPreviewUrl
         } else {
             wallpaper.thumbnailUrl
         }
@@ -204,23 +208,36 @@ fun WallpaperStaggeredCard(
                 .build()
         }
 
-        if (isLoading) {
+        if (isLoading && !fallbackFailed && activeUrl.isNotBlank()) {
             ShimmerBox(modifier = Modifier.fillMaxSize())
         }
 
-        if (useVideoFrameFallback && wallpaper.videoUrl.isNullOrBlank()) {
+        if (fallbackFailed || activeUrl.isBlank()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(ObsidianSurfaceHighest),
+                    .background(ObsidianSurfaceHighest)
+                    .padding(12.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Image,
-                    contentDescription = null,
-                    tint = InkMuted,
-                    modifier = Modifier.size(32.dp),
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Image,
+                        contentDescription = null,
+                        tint = InkMuted,
+                        modifier = Modifier.size(30.dp),
+                    )
+                    Text(
+                        text = wallpaper.title.ifBlank { wallpaper.animeSeries },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = InkMuted,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         } else {
             AsyncImage(
@@ -228,9 +245,25 @@ fun WallpaperStaggeredCard(
                 contentDescription = "${wallpaper.title} wallpaper thumbnail",
                 contentScale = ContentScale.Crop,
                 onSuccess = { isLoading = false },
-                onError = {
-                    isLoading = false
-                    useVideoFrameFallback = true
+                onError = { errorState ->
+                    if (wallpaper.isLive) {
+                        runCatching {
+                            Log.e(
+                                "LIVE_DEBUG",
+                                "Grid image load failed id=${wallpaper.id} url=$activeUrl",
+                                errorState.result.throwable,
+                            )
+                        }
+                    }
+                    val canTryFallback = !useVideoFrameFallback &&
+                            !fallbackPreviewUrl.isNullOrBlank() &&
+                            fallbackPreviewUrl != wallpaper.thumbnailUrl
+                    if (canTryFallback) {
+                        useVideoFrameFallback = true
+                    } else {
+                        isLoading = false
+                        fallbackFailed = true
+                    }
                 },
                 modifier = Modifier.fillMaxSize(),
             )

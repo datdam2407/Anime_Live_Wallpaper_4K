@@ -1,11 +1,14 @@
 package com.example
 
 import com.example.data.local.CacheExpiryPolicy
-import com.example.data.local.LiveWallpaperDataSource
+import com.example.data.local.LiveWallpaperDownloader
 import com.example.data.local.dao.WallpaperDao
 import com.example.data.local.entity.CachedWallpaperEntity
 import com.example.data.local.entity.FavoriteWallpaperEntity
 import com.example.data.local.entity.QueryCacheMetaEntity
+import com.example.data.remote.LiveCatalogApi
+import com.example.data.remote.LiveCatalogResponse
+import com.example.data.remote.LiveWallpaperItem
 import com.example.data.remote.RedditChild
 import com.example.data.remote.RedditImageSource
 import com.example.data.remote.RedditListingData
@@ -18,12 +21,14 @@ import com.example.data.remote.WallhavenItem
 import com.example.data.remote.WallhavenResponse
 import com.example.data.remote.WallhavenService
 import com.example.data.remote.WallhavenThumbs
+import com.example.data.repository.LiveWallpaperRepository
 import com.example.data.repository.WallpaperRepository
 import com.example.domain.model.ResolutionTier
 import com.example.domain.model.SortOption
 import com.example.domain.model.WallpaperFilter
 import java.io.File
 import java.io.IOException
+import okhttp3.OkHttpClient
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -346,122 +351,6 @@ class WallpaperRepositoryTest {
     }
 
     @Test
-    fun `parses 57 live mp4 json items and filters by category and alias`() = runTest {
-        val jsonFile = listOf(
-            File("src/main/assets/live_wallpapers.json"),
-            File("app/src/main/assets/live_wallpapers.json"),
-        ).first { it.exists() }
-        val dataSource = LiveWallpaperDataSource { jsonFile.readText() }
-
-        val parsed = dataSource.getAllParsedItems()
-        assertEquals(57, parsed.size)
-
-        val trendingPage1 = dataSource.getLiveWallpapersPage(
-            query = WallpaperRepository.HOME_TRENDING_KEY,
-            page = 1,
-            pageSize = LiveWallpaperDataSource.DEFAULT_PAGE_SIZE,
-        )
-        assertEquals(45, trendingPage1.items.size)
-        assertTrue(trendingPage1.hasMore)
-        assertTrue(trendingPage1.items.all { it.isLive && it.videoUrl?.endsWith(".mp4") == true })
-        assertTrue(trendingPage1.items.all { it.thumbnailUrl.endsWith(".jpg") })
-
-        val trendingPage2 = dataSource.getLiveWallpapersPage(
-            query = WallpaperRepository.HOME_TRENDING_KEY,
-            page = 2,
-            pageSize = LiveWallpaperDataSource.DEFAULT_PAGE_SIZE,
-        )
-        assertEquals(12, trendingPage2.items.size)
-        assertFalse(trendingPage2.hasMore)
-
-        val onePiece = dataSource.getLiveWallpapersPage(query = "One Piece", page = 1)
-        assertEquals(3, onePiece.items.size)
-        assertTrue(onePiece.items.all { it.animeSeries == "One Piece" })
-
-        val demonSlayer = dataSource.getLiveWallpapersPage(query = "Demon Slayer", page = 1)
-        assertEquals(2, demonSlayer.items.size)
-
-        val reZero = dataSource.getLiveWallpapersPage(query = "Re:Zero", page = 1)
-        assertEquals(1, reZero.items.size)
-        assertEquals("Emilia", reZero.items.first().title)
-
-        val totoro = dataSource.getLiveWallpapersPage(query = "Totoro", page = 1)
-        assertEquals(1, totoro.items.size)
-        assertEquals("My Neighbor Totoro", totoro.items.first().animeSeries)
-
-        val frieren = dataSource.getLiveWallpapersPage(query = "Frieren", page = 1)
-        assertEquals(7, frieren.items.size)
-
-        val jjk = dataSource.getLiveWallpapersPage(query = "Jujutsu Kaisen", page = 1)
-        assertEquals(8, jjk.items.size)
-
-        val jojo = dataSource.getLiveWallpapersPage(query = "JoJo's Bizarre Adventure", page = 1)
-        assertEquals(5, jojo.items.size)
-
-        val oshiNoKo = dataSource.getLiveWallpapersPage(query = "Oshi no Ko", page = 1)
-        assertEquals(4, oshiNoKo.items.size)
-
-        val bleach = dataSource.getLiveWallpapersPage(query = "Bleach", page = 1)
-        assertEquals(7, bleach.items.size)
-
-        val soloLeveling = dataSource.getLiveWallpapersPage(query = "Solo Leveling", page = 1)
-        assertEquals(9, soloLeveling.items.size)
-
-        val apothecary = dataSource.getLiveWallpapersPage(query = "The Apothecary Diaries", page = 1)
-        assertEquals(2, apothecary.items.size)
-    }
-
-    @Test
-    fun `paginates live wallpapers 45 items per page through repository`() = runTest {
-        val entries = (1..105).joinToString(prefix = "[", postfix = "]") { idx ->
-            """{"ID":"Live_$idx","Image_live_url":"https://res.cloudinary.com/demo/video/upload/v1/sample_$idx.mp4","Category":"Naruto","Description":"Clip $idx"}"""
-        }
-        val liveSource = LiveWallpaperDataSource { entries }
-        val unusedWallhaven = object : WallhavenService {
-            override suspend fun searchAnime(
-                query: String?,
-                categories: String,
-                purity: String,
-                ratios: String?,
-                atleast: String?,
-                sorting: String,
-                order: String?,
-                topRange: String?,
-                page: Int,
-            ): Response<WallhavenResponse> = Response.success(WallhavenResponse())
-        }
-        val unusedReddit = object : RedditService {
-            override suspend fun searchSubreddit(
-                subreddit: String,
-                query: String,
-                restrictSr: String,
-                sort: String,
-                time: String,
-                limit: Int,
-            ): Response<RedditResponse> = Response.success(RedditResponse())
-        }
-
-        val repo = WallpaperRepository(unusedWallhaven, unusedReddit, FakeWallpaperDao(), liveSource)
-
-        val page1 = repo.getWallpapers(WallpaperRepository.HOME_TRENDING_KEY, isLive = true, filter = WallpaperFilter(), page = 1)
-        val page2 = repo.getWallpapers(WallpaperRepository.HOME_TRENDING_KEY, isLive = true, filter = WallpaperFilter(), page = 2)
-        val page3 = repo.getWallpapers(WallpaperRepository.HOME_TRENDING_KEY, isLive = true, filter = WallpaperFilter(), page = 3)
-
-        assertEquals(45, page1.wallpapers.size)
-        assertTrue(page1.hasMore)
-        assertEquals("mp4_Live_1", page1.wallpapers.first().id)
-
-        assertEquals(45, page2.wallpapers.size)
-        assertTrue(page2.hasMore)
-        assertEquals("mp4_Live_46", page2.wallpapers.first().id)
-
-        assertEquals(15, page3.wallpapers.size)
-        assertFalse(page3.hasMore)
-        assertEquals("mp4_Live_91", page3.wallpapers.first().id)
-        assertEquals("mp4_Live_105", page3.wallpapers.last().id)
-    }
-
-    @Test
     fun `prefetchTrendingQueueBatch warms page 2 into cache so scroll uses cache without extra API calls`() = runTest {
         val wallhavenCalls = AtomicInteger(0)
         val wallhaven = object : WallhavenService {
@@ -510,7 +399,6 @@ class WallpaperRepositoryTest {
             wallhavenApi = wallhaven,
             redditApi = unusedReddit,
             wallpaperDao = FakeWallpaperDao(),
-            liveWallpaperDataSource = LiveWallpaperDataSource { """[{"ID":"Gojo_1","Image_live_url":"https://res.cloudinary.com/demo/video/upload/v1/gojo.mp4","Category":"Jujutsu Kaisen","Description":"Gojo"}]""" },
         )
 
         repo.warmupLiveCatalog()
@@ -716,5 +604,83 @@ class WallpaperRepositoryTest {
         assertEquals(1, offlineResult.wallpapers.size)
         assertEquals("wh_item_2", offlineResult.wallpapers.first().id)
         assertEquals(1, repo.getCachedWallpapersSnapshot("Naruto", isLive = false, filter = toplistFilter).size)
+    }
+
+    @Test
+    fun `live R2 pagination page 2 beyond 14 items returns clean end-of-list without error banner`() = runTest {
+        val sampleItems = (1..14).map { idx ->
+            val id = "kuro_${idx.toString().padStart(4, '0')}"
+            LiveWallpaperItem(
+                id = id,
+                title = "Anime Live $idx",
+                category = "Frieren",
+                thumbUrl = "https://pub-demo.r2.dev/$id/thumb.jpg",
+                previewUrl = "https://pub-demo.r2.dev/$id/preview.mp4",
+                fullUrl = "https://pub-demo.r2.dev/$id/full.mp4",
+            )
+        }
+        val fakeLiveApi = object : LiveCatalogApi {
+            override suspend fun getLiveCatalog(): LiveCatalogResponse {
+                return LiveCatalogResponse(version = 1, total = sampleItems.size, wallpapers = sampleItems)
+            }
+
+            override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = getLiveCatalog()
+        }
+        val liveRepo = LiveWallpaperRepository(
+            api = fakeLiveApi,
+            downloader = LiveWallpaperDownloader(
+                storageRootDir = File(System.getProperty("java.io.tmpdir"), "live_page2_test"),
+                downloadClient = OkHttpClient(),
+            ),
+        )
+        val emptyWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> = Response.success(WallhavenResponse(emptyList()))
+        }
+        val emptyReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.success(RedditResponse())
+        }
+        val repo = WallpaperRepository(
+            wallhavenApi = emptyWallhaven,
+            redditApi = emptyReddit,
+            wallpaperDao = FakeWallpaperDao(),
+            liveWallpaperRepository = liveRepo,
+        )
+
+        val page1 = repo.getWallpapers(
+            query = WallpaperRepository.HOME_TRENDING_KEY,
+            isLive = true,
+            filter = WallpaperFilter(),
+            page = 1,
+        )
+        assertEquals(14, page1.wallpapers.size)
+        assertFalse(page1.hasMore)
+        assertNull(page1.warningMessage)
+
+        val page2 = repo.getWallpapers(
+            query = WallpaperRepository.HOME_TRENDING_KEY,
+            isLive = true,
+            filter = WallpaperFilter(),
+            page = 2,
+        )
+        assertTrue(page2.wallpapers.isEmpty())
+        assertFalse(page2.hasMore)
+        assertNull(page2.warningMessage)
     }
 }

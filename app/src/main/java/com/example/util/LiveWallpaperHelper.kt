@@ -54,7 +54,7 @@ object LiveWallpaperHelper {
         val wm = runCatching { WallpaperManager.getInstance(context) }.getOrNull() ?: return false
         val lockInfo = runCatching { wm.getWallpaperInfo(WallpaperManager.FLAG_LOCK) }.getOrNull()
         return lockInfo != null &&
-            isKnownAnimeService(lockInfo.packageName, lockInfo.serviceName, context.packageName)
+                isKnownAnimeService(lockInfo.packageName, lockInfo.serviceName, context.packageName)
     }
 
     /**

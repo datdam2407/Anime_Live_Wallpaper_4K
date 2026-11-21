@@ -1,6 +1,5 @@
 package com.example.ads
 
-
 import android.content.Context
 import com.google.android.gms.ads.AdListener
 import com.google.android.gms.ads.AdLoader
@@ -10,7 +9,6 @@ import com.google.android.gms.ads.VideoOptions
 import com.google.android.gms.ads.nativead.NativeAd
 import com.google.android.gms.ads.nativead.NativeAdOptions
 import com.kuroanimelivewallpapers.app.BuildConfig
-
 
 /**
  * Pure, framework-agnostic FIFO buffer/queue engine for preloaded ads.
@@ -32,20 +30,17 @@ class NativeAdBuffer<T>(
         val loadedAtMs: Long,
     )
 
-
     private class PendingWaiter<T>(
         val onLoaded: (T) -> Unit,
         val onFailed: () -> Unit,
         var canceled: Boolean = false,
     )
 
-
     private val lock = Any()
     private val queue = ArrayDeque<BufferedItem<T>>()
     private val waiters = ArrayDeque<PendingWaiter<T>>()
     private var inFlightCount: Int = 0
     private var isCleared: Boolean = false
-
 
     val bufferedCount: Int
         get() {
@@ -60,10 +55,8 @@ class NativeAdBuffer<T>(
             return size
         }
 
-
     val activeInFlightCount: Int
         get() = synchronized(lock) { inFlightCount }
-
 
     /**
      * Triggers background loads until buffered + in-flight count reaches [bufferSize].
@@ -74,7 +67,6 @@ class NativeAdBuffer<T>(
         }
         ensureBufferFilled()
     }
-
 
     /**
      * Synchronously pulls a preloaded ad from the queue if available, and immediately
@@ -95,7 +87,6 @@ class NativeAdBuffer<T>(
         return popped
     }
 
-
     /**
      * Requests an ad: delivers synchronously from the buffer if non-empty, otherwise queues
      * a waiter for the next background load. Returns a cancellation callback to invoke when
@@ -111,7 +102,6 @@ class NativeAdBuffer<T>(
             return {}
         }
 
-
         val waiter = PendingWaiter(onLoaded = onLoaded, onFailed = onFailed)
         synchronized(lock) {
             isCleared = false
@@ -125,7 +115,6 @@ class NativeAdBuffer<T>(
             }
         }
     }
-
 
     /**
      * Destroys all buffered ads and cancels all pending UI waiters.
@@ -144,7 +133,6 @@ class NativeAdBuffer<T>(
         toDestroy.forEach(onDestroy)
     }
 
-
     private fun ensureBufferFilled() {
         var expired: List<T> = emptyList()
         val needed = synchronized(lock) {
@@ -161,7 +149,6 @@ class NativeAdBuffer<T>(
         }
     }
 
-
     private fun launchSingleLoad() {
         synchronized(lock) {
             if (isCleared) return
@@ -173,12 +160,10 @@ class NativeAdBuffer<T>(
         )
     }
 
-
     private fun handleLoadSuccess(loadedAd: T) {
         var deliverTo: PendingWaiter<T>? = null
         var shouldDestroyExcess = false
         var expired: List<T> = emptyList()
-
 
         synchronized(lock) {
             inFlightCount = (inFlightCount - 1).coerceAtLeast(0)
@@ -203,11 +188,9 @@ class NativeAdBuffer<T>(
             }
         }
 
-
         if (expired.isNotEmpty()) {
             expired.forEach(onDestroy)
         }
-
 
         when {
             shouldDestroyExcess -> onDestroy(loadedAd)
@@ -218,7 +201,6 @@ class NativeAdBuffer<T>(
             else -> ensureBufferFilled()
         }
     }
-
 
     private fun handleLoadFailure() {
         val failedWaiters = mutableListOf<PendingWaiter<T>>()
@@ -235,7 +217,6 @@ class NativeAdBuffer<T>(
         }
         failedWaiters.forEach { it.onFailed() }
     }
-
 
     private fun pruneExpiredLocked(): List<T> {
         val now = clockMillis()
@@ -256,10 +237,9 @@ class NativeAdBuffer<T>(
     }
 }
 
-
 /**
- * Application-scoped Native Ad Manager maintaining a 2-3 [NativeAd] preload queue/buffer
- * for instant display in grids & pagers without layout shifts or blank spaces.
+ * Application-scoped Native Ad Manager maintaining a 1-2 [NativeAd] preload queue/buffer
+ * for smooth display in grids & pagers while keeping AdMob Show Rate healthy.
  *
  * Callers MUST still call `nativeAd.destroy()` inside Compose `DisposableEffect` when the
  * displayed ad item leaves composition or scrolls off-screen.
@@ -271,36 +251,29 @@ class NativeAdManager(
 ) {
     private val context = appContext.applicationContext
 
-
     private val buffer = NativeAdBuffer<NativeAd>(
-        bufferSize = bufferSize.coerceIn(2, 3),
+        bufferSize = bufferSize.coerceIn(1, 2),
         onDestroy = { ad -> ad.destroy() },
         startLoad = { onLoaded, onFailed -> loadNativeAd(onLoaded, onFailed) },
     )
 
-
     val bufferedCount: Int
         get() = buffer.bufferedCount
-
 
     fun preloadBuffer() {
         buffer.preloadBuffer()
     }
 
-
     fun popAd(): NativeAd? = buffer.popAd()
-
 
     fun requestAd(
         onLoaded: (NativeAd) -> Unit,
         onFailed: () -> Unit,
     ): () -> Unit = buffer.requestAd(onLoaded = onLoaded, onFailed = onFailed)
 
-
     fun clearBuffer() {
         buffer.clear()
     }
-
 
     private fun loadNativeAd(
         onLoaded: (NativeAd) -> Unit,
@@ -313,7 +286,6 @@ class NativeAdManager(
             .setAdChoicesPlacement(NativeAdOptions.ADCHOICES_TOP_RIGHT)
             .setVideoOptions(videoOptions)
             .build()
-
 
         runCatching {
             val loader = AdLoader.Builder(context, adUnitId)
@@ -329,7 +301,6 @@ class NativeAdManager(
                 )
                 .withNativeAdOptions(adOptions)
                 .build()
-
 
             loader.loadAd(AdRequest.Builder().build())
         }.onFailure {

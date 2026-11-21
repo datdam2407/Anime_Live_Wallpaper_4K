@@ -12,6 +12,30 @@ data class AnimeCategory(
 )
 
 @Immutable
+data class AnimeSeriesPreview(
+    val categoryId: String,
+    val thumbnailUrls: List<String> = emptyList(),
+    val wallpapers: List<AppWallpaper> = emptyList(),
+    val totalCount: Int = 0,
+    val isLoading: Boolean = false,
+) {
+    val remainingCount: Int
+        get() = (totalCount - thumbnailUrls.size.coerceAtMost(4)).coerceAtLeast(0)
+
+    fun formatRemainingBadge(): String? {
+        val remaining = remainingCount
+        if (remaining <= 0) return null
+        return if (remaining < 1000) {
+            "+$remaining"
+        } else {
+            val thousands = remaining / 1000
+            val tenths = (remaining % 1000) / 100
+            if (tenths == 0) "+${thousands}K" else "+${thousands}.${tenths}K"
+        }
+    }
+}
+
+@Immutable
 data class TrendingAnimeTopic(
     val title: String,
     val query: String,
@@ -222,14 +246,132 @@ object AnimeCatalog {
         ),
     )
 
+    /**
+     * 12 primary wallpaper domains shown in HomeScreen category chips and SearchScreen Trending Categories grid.
+     * Wallhaven categories bitmask: General (1xx) | Anime (x1x) | People (xx1).
+     */
+    val exploreCategories: List<TrendingAnimeTopic> = listOf(
+        TrendingAnimeTopic(
+            title = "Anime",
+            query = "anime",
+            categories = "010",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Games",
+            query = "video games",
+            categories = "110",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "City",
+            query = "cityscape neon",
+            categories = "110",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Cars",
+            query = "sports car",
+            categories = "100",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Nature",
+            query = "nature landscape",
+            categories = "100",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "TV & Movies",
+            query = "movies cinema",
+            categories = "101",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Cute",
+            query = "cute kawaii",
+            categories = "110",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Sci-Fi",
+            query = "sci-fi futuristic",
+            categories = "110",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Abstract",
+            query = "abstract art",
+            categories = "100",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Animals",
+            query = "wildlife animals",
+            categories = "100",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Comics",
+            query = "comics superhero",
+            categories = "110",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+        TrendingAnimeTopic(
+            title = "Lifestyle",
+            query = "aesthetic lifestyle",
+            categories = "101",
+            purity = "100",
+            sorting = "toplist",
+            order = "desc",
+            initialPage = 1,
+        ),
+    )
+
     val trendingQueries: List<String> = trendingTopics.map { it.title }
 
     fun findTrendingTopic(queryOrTitle: String): TrendingAnimeTopic? {
         val normalized = queryOrTitle.trim()
         if (normalized.isEmpty()) return null
-        return trendingTopics.firstOrNull { topic ->
+        return exploreCategories.firstOrNull { topic ->
             topic.title.equals(normalized, ignoreCase = true) ||
-                topic.query.equals(normalized, ignoreCase = true)
+                    topic.query.equals(normalized, ignoreCase = true)
+        } ?: trendingTopics.firstOrNull { topic ->
+            topic.title.equals(normalized, ignoreCase = true) ||
+                    topic.query.equals(normalized, ignoreCase = true)
         }
     }
 }

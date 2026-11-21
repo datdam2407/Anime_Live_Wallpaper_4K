@@ -1,7 +1,6 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 import java.util.Properties
 
-
 val envProperties = Properties().apply {
   val envFile = rootProject.file(".env")
   if (envFile.exists()) {
@@ -9,18 +8,15 @@ val envProperties = Properties().apply {
   }
 }
 
-
 fun readEnvConfig(key: String): String? {
   return envProperties.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() }
     ?: System.getenv(key)?.trim()?.takeIf { it.isNotEmpty() }
 }
 
-
 val testAdMobAppId = "ca-app-pub-3940256099942544~3347511713"
 val testAdMobBannerId = "ca-app-pub-3940256099942544/9214589741"
 val testAdMobInterstitialId = "ca-app-pub-3940256099942544/1033173712"
 val testAdMobNativeId = "ca-app-pub-3940256099942544/2247696110"
-
 
 val useProductionAdMob = readEnvConfig("ADMOB_USE_PRODUCTION_IDS").equals("true", ignoreCase = true)
 val releaseAdMobAppId = if (useProductionAdMob) {
@@ -44,7 +40,6 @@ val releaseAdMobNativeId = if (useProductionAdMob) {
   testAdMobNativeId
 }
 
-
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
@@ -54,23 +49,19 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
-
 android {
   namespace = "com.kuroanimelivewallpapers.app"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
-
 
   defaultConfig {
     applicationId = "com.kuroanimelivewallpapers.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
+    versionCode = 4
     versionName = "1.0.1"
-
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
-
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
   // and updating Android apps in AI Studio.
@@ -90,7 +81,6 @@ android {
     }
   }
 
-
   buildTypes {
     release {
       isCrunchPngs = false
@@ -102,8 +92,9 @@ android {
       buildConfigField("String", "ADMOB_BANNER_AD_UNIT_ID", "\"$releaseAdMobBannerId\"")
       buildConfigField("String", "ADMOB_INTERSTITIAL_AD_UNIT_ID", "\"$releaseAdMobInterstitialId\"")
       buildConfigField("String", "ADMOB_NATIVE_AD_UNIT_ID", "\"$releaseAdMobNativeId\"")
-      // Chỉ gắn signingConfig nếu project local có khai báo signingConfigs.create("release")
-      signingConfigs.findByName("release")?.let { signingConfig = it }
+      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
+      // AI Studio.
+      signingConfig = signingConfigs.getByName("release")
     }
     debug {
       manifestPlaceholders["ADMOB_APP_ID"] = testAdMobAppId
@@ -111,11 +102,11 @@ android {
       buildConfigField("String", "ADMOB_BANNER_AD_UNIT_ID", "\"$testAdMobBannerId\"")
       buildConfigField("String", "ADMOB_INTERSTITIAL_AD_UNIT_ID", "\"$testAdMobInterstitialId\"")
       buildConfigField("String", "ADMOB_NATIVE_AD_UNIT_ID", "\"$testAdMobNativeId\"")
-      // Không cần set signingConfig ở đây — Android Studio tự dùng debug keystore mặc định
+      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
+      // AI Studio.
+     // signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
-
-
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
@@ -131,7 +122,6 @@ android {
   }
 }
 
-
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.
 secrets {
@@ -141,9 +131,7 @@ secrets {
   ignoreList.add("ADMOB_.*")
 }
 
-
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
-
 
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
@@ -176,7 +164,6 @@ dependencies {
   // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
-
 
   // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google
   // Sign-In via Credential Manager:
@@ -215,7 +202,3 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
-
-
-
-

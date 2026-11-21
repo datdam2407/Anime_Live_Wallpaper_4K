@@ -1,6 +1,5 @@
 package com.example.ads
 
-
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -90,20 +89,19 @@ import com.google.android.gms.ads.nativead.NativeAd
 import com.google.android.gms.ads.nativead.NativeAdOptions
 import com.google.android.gms.ads.nativead.NativeAdView
 
-
 enum class NativeAdStyle {
     /** Full-width split landscape/media card interspersed every 6-8 items in the grid. */
     GRID_CARD,
 
-
     /** Full-height swipeable Native Ad page shown every 5 items in Detail HorizontalPager. */
     FULL_PAGER,
 
-
     /** Compact Native Ad card pinned below metadata & actions on the Detail screen. */
     DETAIL_BOTTOM,
-}
 
+    /** Sleek horizontal inline Native Ad banner placed between Trending Color and Trending Categories on Search screen. */
+    SEARCH_BANNER,
+}
 
 sealed interface WallpaperGridEntry {
     data class WallpaperItem(
@@ -111,12 +109,10 @@ sealed interface WallpaperGridEntry {
         val originalIndex: Int,
     ) : WallpaperGridEntry
 
-
     data class NativeAdSlot(
         val slotKey: String,
     ) : WallpaperGridEntry
 }
-
 
 sealed interface DetailPagerEntry {
     data class WallpaperPage(
@@ -124,12 +120,10 @@ sealed interface DetailPagerEntry {
         val wallpaperIndex: Int,
     ) : DetailPagerEntry
 
-
     data class NativeAdPage(
         val slotKey: String,
     ) : DetailPagerEntry
 }
-
 
 /**
  * Intersperses 1 NativeAdSlot after every [interval] wallpaper items (6-8 range).
@@ -150,7 +144,6 @@ fun buildFeedWithNativeAds(
     return result
 }
 
-
 /**
  * Intersperses 1 full-page Native Ad after every [interval] wallpapers in the Detail HorizontalPager.
  */
@@ -170,7 +163,6 @@ fun buildDetailPagerEntries(
     return entries
 }
 
-
 fun mapWallpaperIndexToPagerPosition(
     entries: List<DetailPagerEntry>,
     wallpaperIndex: Int,
@@ -182,20 +174,17 @@ fun mapWallpaperIndexToPagerPosition(
     return found.coerceAtLeast(0)
 }
 
-
 sealed interface CategoryGridEntry {
     data class CategoryItem(
         val category: AnimeCategory,
         val originalIndex: Int,
     ) : CategoryGridEntry
 
-
     data class NativeAdSlot(
         val slotKey: String,
         val afterItemCount: Int,
     ) : CategoryGridEntry
 }
-
 
 /**
  * Calculates progressive item counts after which Native Ads are inserted to prevent user fatigue.
@@ -223,7 +212,6 @@ fun calculateProgressiveAdPositions(
     return positions
 }
 
-
 /**
  * Intersperses full-width Native Ad slots inside the Anime 200 list/grid at progressive gaps
  * (6, +8 = 14, +10 = 24, +12 = 36, ...).
@@ -245,7 +233,6 @@ fun buildCategoriesWithProgressiveAds(
         }
     }
 
-
     val entries = ArrayList<CategoryGridEntry>(categories.size + thresholds.size)
     categories.forEachIndexed { index, category ->
         entries += CategoryGridEntry.CategoryItem(category = category, originalIndex = index)
@@ -260,13 +247,11 @@ fun buildCategoriesWithProgressiveAds(
     return entries
 }
 
-
 tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
 }
-
 
 /**
  * Anchored Adaptive Banner Ad that scales dynamically to available screen width.
@@ -292,13 +277,10 @@ fun AdaptiveBannerAd(
         consentManager.canRequestAds.collectAsStateWithLifecycle().value
     }
 
-
     var isAdFailed by remember(adUnitId) { mutableStateOf(false) }
     var isAdLoaded by remember(adUnitId) { mutableStateOf(false) }
 
-
     if (isAdFailed || (!isPreview && !canRequestAds)) return
-
 
     BoxWithConstraints(
         modifier = modifier
@@ -315,7 +297,6 @@ fun AdaptiveBannerAd(
             val px = runCatching { adSize.getHeightInPixels(context) }.getOrDefault(0)
             if (px > 0) with(density) { px.toDp() } else adSize.height.coerceAtLeast(50).dp
         }
-
 
         Column(modifier = Modifier.fillMaxWidth()) {
             if (topSafeMargin > 0.dp) {
@@ -336,7 +317,7 @@ fun AdaptiveBannerAd(
             ) {
                 if (isPreview) {
                     Text(
-                        text = "Ad • Adaptive Banner (adSize.widthx{adSize.height})",
+                        text = "Ad • Adaptive Banner (${adSize.width}x${adSize.height})",
                         style = MaterialTheme.typography.labelSmall,
                         color = InkMuted,
                     )
@@ -351,7 +332,6 @@ fun AdaptiveBannerAd(
                                     isAdFailed = false
                                 }
 
-
                                 override fun onAdFailedToLoad(error: LoadAdError) {
                                     isAdLoaded = false
                                     isAdFailed = true
@@ -360,7 +340,6 @@ fun AdaptiveBannerAd(
                             loadAd(AdRequest.Builder().build())
                         }
                     }
-
 
                     DisposableEffect(lifecycleOwner, adView) {
                         val observer = LifecycleEventObserver { _, event ->
@@ -377,7 +356,6 @@ fun AdaptiveBannerAd(
                         }
                     }
 
-
                     if (!isAdLoaded) {
                         Text(
                             text = "Sponsored",
@@ -385,7 +363,6 @@ fun AdaptiveBannerAd(
                             color = InkMuted.copy(alpha = 0.6f),
                         )
                     }
-
 
                     AndroidView(
                         factory = { adView },
@@ -399,13 +376,11 @@ fun AdaptiveBannerAd(
     }
 }
 
-
 private data class ManagedNativeAdState(
     val nativeAd: NativeAd? = null,
     val isLoading: Boolean = true,
     val isFailed: Boolean = false,
 )
-
 
 private class ManagedNativeAdHolder(
     initialAd: NativeAd?,
@@ -413,7 +388,6 @@ private class ManagedNativeAdHolder(
 ) : RememberObserver {
     var heldAd: NativeAd? = initialAd
         private set
-
 
     var state by mutableStateOf(
         ManagedNativeAdState(
@@ -423,7 +397,6 @@ private class ManagedNativeAdHolder(
         ),
     )
         private set
-
 
     fun replaceAd(newAd: NativeAd) {
         if (heldAd === newAd) return
@@ -436,7 +409,6 @@ private class ManagedNativeAdHolder(
         )
     }
 
-
     fun markFailed() {
         if (heldAd == null) {
             state = ManagedNativeAdState(
@@ -447,27 +419,22 @@ private class ManagedNativeAdHolder(
         }
     }
 
-
     fun release() {
         val toDestroy = heldAd
         heldAd = null
         toDestroy?.destroy()
     }
 
-
     override fun onRemembered() = Unit
-
 
     override fun onForgotten() {
         release()
     }
 
-
     override fun onAbandoned() {
         release()
     }
 }
-
 
 private fun loadSingleNativeAdDirect(
     context: Context,
@@ -483,7 +450,6 @@ private fun loadSingleNativeAdDirect(
         .setVideoOptions(videoOptions)
         .build()
 
-
     runCatching {
         val adLoader = AdLoader.Builder(context, adUnitId)
             .forNativeAd { loadedAd -> onLoaded(loadedAd) }
@@ -497,13 +463,11 @@ private fun loadSingleNativeAdDirect(
             .withNativeAdOptions(adOptions)
             .build()
 
-
         adLoader.loadAd(AdRequest.Builder().build())
     }.onFailure {
         onFailed()
     }
 }
-
 
 /**
  * Memory-safe NativeAd loader backed by [NativeAdManager]'s preload queue:
@@ -523,7 +487,6 @@ private fun rememberManagedNativeAd(
     val context = LocalContext.current
     val isPreview = LocalInspectionMode.current
 
-
     val holder = remember(adUnitId, slotKey, adManager, isPreview, canRequestAds) {
         val preloaded = if (!isPreview && canRequestAds && adManager != null && adUnitId == adManager.adUnitId) {
             adManager.popAd()
@@ -536,14 +499,11 @@ private fun rememberManagedNativeAd(
         )
     }
 
-
     if (isPreview || !canRequestAds) return holder.state
-
 
     DisposableEffect(adUnitId, slotKey, adManager, holder, canRequestAds) {
         var disposed = false
         var cancelPendingRequest: (() -> Unit)? = null
-
 
         if (holder.heldAd == null) {
             if (adManager != null && adUnitId == adManager.adUnitId) {
@@ -581,7 +541,6 @@ private fun rememberManagedNativeAd(
             }
         }
 
-
         onDispose {
             disposed = true
             cancelPendingRequest?.invoke()
@@ -590,10 +549,8 @@ private fun rememberManagedNativeAd(
         }
     }
 
-
     return holder.state
 }
-
 
 /**
  * Policy-compliant Reusable Compose NativeAdView Wrapper:
@@ -630,11 +587,9 @@ fun NativeAdCard(
         canRequestAds = canRequestAds,
     )
 
-
     if ((!isPreview && !canRequestAds) || (adState.isFailed && style != NativeAdStyle.FULL_PAGER)) {
         return
     }
-
 
     val distinctContainerColor = Color(0xFF1F1A2E)
     val distinctBorderColor = ElectricViolet.copy(alpha = 0.58f)
@@ -642,16 +597,16 @@ fun NativeAdCard(
         NativeAdStyle.GRID_CARD -> 18.dp
         NativeAdStyle.FULL_PAGER -> 24.dp
         NativeAdStyle.DETAIL_BOTTOM -> 18.dp
+        NativeAdStyle.SEARCH_BANNER -> 14.dp
     }
     val shape = RoundedCornerShape(cornerRadius)
-
 
     val containerHeightModifier = when (style) {
         NativeAdStyle.GRID_CARD -> Modifier.fillMaxWidth().heightIn(min = 216.dp)
         NativeAdStyle.FULL_PAGER -> Modifier.fillMaxSize()
         NativeAdStyle.DETAIL_BOTTOM -> Modifier.fillMaxWidth().wrapContentHeight()
+        NativeAdStyle.SEARCH_BANNER -> Modifier.fillMaxWidth().wrapContentHeight()
     }
-
 
     Surface(
         shape = shape,
@@ -668,7 +623,6 @@ fun NativeAdCard(
                 NativeAdPreviewPlaceholder(style = style)
             }
 
-
             adState.isLoading -> {
                 Box(
                     modifier = Modifier
@@ -678,9 +632,10 @@ fun NativeAdCard(
                                 NativeAdStyle.GRID_CARD -> 216.dp
                                 NativeAdStyle.FULL_PAGER -> 420.dp
                                 NativeAdStyle.DETAIL_BOTTOM -> 116.dp
+                                NativeAdStyle.SEARCH_BANNER -> 76.dp
                             },
                         )
-                        .padding(12.dp),
+                        .padding(10.dp),
                 ) {
                     ShimmerBox(
                         modifier = Modifier
@@ -690,7 +645,6 @@ fun NativeAdCard(
                     AdBadgeChip(modifier = Modifier.align(Alignment.TopStart))
                 }
             }
-
 
             adState.isFailed -> {
                 // Only reached for FULL_PAGER when offline so user doesn't see a blank page
@@ -718,7 +672,6 @@ fun NativeAdCard(
                 }
             }
 
-
             adState.nativeAd != null -> {
                 val ad = adState.nativeAd
                 val adLabelText = stringResource(id = R.string.ad_badge_label)
@@ -733,12 +686,16 @@ fun NativeAdCard(
                         )
                     },
                     update = { view ->
-                        bindNativeAd(view, ad, ctaFallbackText)
+                        if (view.getTag(R.id.tag_bound_native_ad) !== ad) {
+                            view.setTag(R.id.tag_bound_native_ad, ad)
+                            bindNativeAd(view, ad, ctaFallbackText)
+                        }
                     },
                     onRelease = { view ->
+                        view.setTag(R.id.tag_bound_native_ad, null)
                         view.destroy()
                     },
-                    modifier = if (style == NativeAdStyle.DETAIL_BOTTOM) {
+                    modifier = if (style == NativeAdStyle.DETAIL_BOTTOM || style == NativeAdStyle.SEARCH_BANNER) {
                         Modifier.fillMaxWidth().wrapContentHeight()
                     } else {
                         Modifier.fillMaxSize()
@@ -748,7 +705,6 @@ fun NativeAdCard(
         }
     }
 }
-
 
 @Composable
 private fun AdBadgeChip(modifier: Modifier = Modifier) {
@@ -766,7 +722,6 @@ private fun AdBadgeChip(modifier: Modifier = Modifier) {
         )
     }
 }
-
 
 @Composable
 private fun NativeAdPreviewPlaceholder(style: NativeAdStyle) {
@@ -801,7 +756,6 @@ private fun NativeAdPreviewPlaceholder(style: NativeAdStyle) {
     }
 }
 
-
 private const val TAG_HEADLINE = 1001
 private const val TAG_BODY = 1002
 private const val TAG_ICON = 1003
@@ -809,14 +763,12 @@ private const val TAG_MEDIA = 1004
 private const val TAG_CTA = 1005
 private const val TAG_AD_CHOICES = 1006
 
-
 private fun Int.dpToPx(context: Context): Int =
     TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP,
         this.toFloat(),
         context.resources.displayMetrics,
     ).toInt()
-
 
 private fun buildNativeAdView(
     context: Context,
@@ -835,7 +787,6 @@ private fun buildNativeAdView(
         )
     }
 
-
     val badgeView = TextView(context).apply {
         text = adBadgeText
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f) // Strictly >= 10sp
@@ -848,7 +799,6 @@ private fun buildNativeAdView(
         }
     }
 
-
     val adChoicesView = AdChoicesView(context).apply {
         tag = TAG_AD_CHOICES
         layoutParams = LinearLayout.LayoutParams(
@@ -856,7 +806,6 @@ private fun buildNativeAdView(
             LinearLayout.LayoutParams.WRAP_CONTENT,
         )
     }
-
 
     val iconView = ImageView(context).apply {
         tag = TAG_ICON
@@ -868,7 +817,6 @@ private fun buildNativeAdView(
         clipToOutline = true
     }
 
-
     // AdMob Native Policy: Do NOT truncate headline (>= 25 chars) or body (>= 90 chars)
     val headlineView = TextView(context).apply {
         tag = TAG_HEADLINE
@@ -879,7 +827,6 @@ private fun buildNativeAdView(
         setTextSize(TypedValue.COMPLEX_UNIT_SP, if (style == NativeAdStyle.DETAIL_BOTTOM) 14f else 15f)
     }
 
-
     val bodyView = TextView(context).apply {
         tag = TAG_BODY
         setTextColor(AndroidColor.parseColor("#B6B1C9"))
@@ -887,7 +834,6 @@ private fun buildNativeAdView(
         ellipsize = null
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
     }
-
 
     val ctaButton = TextView(context).apply {
         tag = TAG_CTA
@@ -909,11 +855,9 @@ private fun buildNativeAdView(
         }
     }
 
-
     val mediaView = MediaView(context).apply {
         tag = TAG_MEDIA
     }
-
 
     when (style) {
         NativeAdStyle.GRID_CARD -> {
@@ -925,7 +869,6 @@ private fun buildNativeAdView(
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                 )
             }
-
 
             // Left half: MediaView (>= 120dp x 120dp) with "Ad" badge top-left
             val leftMediaFrame = FrameLayout(context).apply {
@@ -950,14 +893,12 @@ private fun buildNativeAdView(
             )
             rootRow.addView(leftMediaFrame)
 
-
             // Right half: AdChoices top-right + Icon + un-truncated Headline + un-truncated Body + Install CTA
             val rightCol = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.05f)
                 setPadding(12.dpToPx(context), 8.dpToPx(context), 12.dpToPx(context), 10.dpToPx(context))
             }
-
 
             val topRightRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -970,13 +911,11 @@ private fun buildNativeAdView(
             topRightRow.addView(adChoicesView)
             rightCol.addView(topRightRow)
 
-
             iconView.layoutParams = LinearLayout.LayoutParams(38.dpToPx(context), 38.dpToPx(context)).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
                 bottomMargin = 6.dpToPx(context)
             }
             rightCol.addView(iconView)
-
 
             headlineView.gravity = Gravity.CENTER_HORIZONTAL
             headlineView.layoutParams = LinearLayout.LayoutParams(
@@ -984,7 +923,6 @@ private fun buildNativeAdView(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             )
             rightCol.addView(headlineView)
-
 
             bodyView.gravity = Gravity.CENTER_HORIZONTAL
             bodyView.layoutParams = LinearLayout.LayoutParams(
@@ -995,7 +933,6 @@ private fun buildNativeAdView(
             }
             rightCol.addView(bodyView)
 
-
             ctaButton.layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 40.dpToPx(context),
@@ -1004,11 +941,9 @@ private fun buildNativeAdView(
             }
             rightCol.addView(ctaButton)
 
-
             rootRow.addView(rightCol)
             nativeAdView.addView(rootRow)
         }
-
 
         NativeAdStyle.FULL_PAGER -> {
             val rootCol = LinearLayout(context).apply {
@@ -1018,7 +953,6 @@ private fun buildNativeAdView(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                 )
             }
-
 
             // Top bar inside card: Ad badge left, AdChoices right
             val topHeader = LinearLayout(context).apply {
@@ -1039,7 +973,6 @@ private fun buildNativeAdView(
             topHeader.addView(adChoicesView)
             rootCol.addView(topHeader)
 
-
             // Center MediaView taking remaining height
             mediaView.layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1047,7 +980,6 @@ private fun buildNativeAdView(
                 1f,
             )
             rootCol.addView(mediaView)
-
 
             // Bottom details + CTA button
             val bottomPanel = LinearLayout(context).apply {
@@ -1059,7 +991,6 @@ private fun buildNativeAdView(
                 setBackgroundColor(AndroidColor.parseColor("#181424"))
                 setPadding(14.dpToPx(context), 12.dpToPx(context), 14.dpToPx(context), 14.dpToPx(context))
             }
-
 
             val metaRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -1073,7 +1004,6 @@ private fun buildNativeAdView(
                 marginEnd = 12.dpToPx(context)
             }
             metaRow.addView(iconView)
-
 
             val textCol = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1090,7 +1020,6 @@ private fun buildNativeAdView(
             metaRow.addView(textCol)
             bottomPanel.addView(metaRow)
 
-
             ctaButton.layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 48.dpToPx(context),
@@ -1100,10 +1029,8 @@ private fun buildNativeAdView(
             bottomPanel.addView(ctaButton)
             rootCol.addView(bottomPanel)
 
-
             nativeAdView.addView(rootCol)
         }
-
 
         NativeAdStyle.DETAIL_BOTTOM -> {
             val rootCol = LinearLayout(context).apply {
@@ -1114,7 +1041,6 @@ private fun buildNativeAdView(
                 )
                 setPadding(12.dpToPx(context), 8.dpToPx(context), 12.dpToPx(context), 10.dpToPx(context))
             }
-
 
             // Top micro-row: "Ad" badge left, AdChoices right
             val topRow = LinearLayout(context).apply {
@@ -1134,7 +1060,6 @@ private fun buildNativeAdView(
             topRow.addView(adChoicesView)
             rootCol.addView(topRow)
 
-
             // Middle row: App icon + Headline + 1-line body
             val infoRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -1151,7 +1076,6 @@ private fun buildNativeAdView(
             }
             infoRow.addView(iconView)
 
-
             val textCol = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -1160,7 +1084,6 @@ private fun buildNativeAdView(
             textCol.addView(bodyView)
             infoRow.addView(textCol)
             rootCol.addView(infoRow)
-
 
             // Full-width CTA button
             ctaButton.layoutParams = LinearLayout.LayoutParams(
@@ -1171,25 +1094,100 @@ private fun buildNativeAdView(
             }
             rootCol.addView(ctaButton)
 
+            nativeAdView.addView(rootCol)
+        }
 
+        NativeAdStyle.SEARCH_BANNER -> {
+            val rootCol = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                )
+                setPadding(10.dpToPx(context), 6.dpToPx(context), 10.dpToPx(context), 8.dpToPx(context))
+            }
+
+            // Compact top meta bar: Ad badge left, AdChoices right
+            val topMetaRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                )
+            }
+            topMetaRow.addView(badgeView)
+            topMetaRow.addView(
+                View(context).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+                },
+            )
+            topMetaRow.addView(adChoicesView)
+            rootCol.addView(topMetaRow)
+
+            // Main horizontal banner row: App icon + Headline/Body + Pill CTA button on right
+            val bannerRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = 4.dpToPx(context)
+                }
+            }
+
+            iconView.layoutParams = LinearLayout.LayoutParams(40.dpToPx(context), 40.dpToPx(context)).apply {
+                marginEnd = 10.dpToPx(context)
+            }
+            bannerRow.addView(iconView)
+
+            val textCol = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = 10.dpToPx(context)
+                }
+            }
+            headlineView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            bodyView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            textCol.addView(headlineView)
+            textCol.addView(bodyView)
+            bannerRow.addView(textCol)
+
+            ctaButton.setPadding(14.dpToPx(context), 8.dpToPx(context), 14.dpToPx(context), 8.dpToPx(context))
+            ctaButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            ctaButton.background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(
+                    AndroidColor.parseColor("#00E676"),
+                    AndroidColor.parseColor("#00C853"),
+                ),
+            ).apply {
+                cornerRadius = 50.dpToPx(context).toFloat()
+            }
+            ctaButton.setTextColor(AndroidColor.parseColor("#09130D"))
+            ctaButton.layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                36.dpToPx(context),
+            )
+            bannerRow.addView(ctaButton)
+
+            rootCol.addView(bannerRow)
             nativeAdView.addView(rootCol)
         }
     }
-
 
     nativeAdView.adChoicesView = adChoicesView
     nativeAdView.headlineView = headlineView
     nativeAdView.bodyView = bodyView
     nativeAdView.iconView = iconView
     nativeAdView.callToActionView = ctaButton
-    if (style != NativeAdStyle.DETAIL_BOTTOM) {
+    if (style != NativeAdStyle.DETAIL_BOTTOM && style != NativeAdStyle.SEARCH_BANNER) {
         nativeAdView.mediaView = mediaView
     }
 
-
     return nativeAdView
 }
-
 
 private fun bindNativeAd(
     nativeAdView: NativeAdView,
@@ -1202,9 +1200,7 @@ private fun bindNativeAd(
     val ctaView = nativeAdView.findViewWithTag<TextView>(TAG_CTA)
     val mediaView = nativeAdView.findViewWithTag<MediaView>(TAG_MEDIA)
 
-
     headlineView?.text = nativeAd.headline.orEmpty()
-
 
     if (nativeAd.body.isNullOrBlank()) {
         bodyView?.visibility = View.GONE
@@ -1212,7 +1208,6 @@ private fun bindNativeAd(
         bodyView?.visibility = View.VISIBLE
         bodyView?.text = nativeAd.body
     }
-
 
     val iconDrawable = nativeAd.icon?.drawable
     if (iconDrawable == null) {
@@ -1222,18 +1217,15 @@ private fun bindNativeAd(
         iconView?.setImageDrawable(iconDrawable)
     }
 
-
     if (nativeAd.callToAction.isNullOrBlank()) {
         ctaView?.text = ctaFallback
     } else {
         ctaView?.text = nativeAd.callToAction
     }
 
-
     if (mediaView != null && nativeAdView.mediaView != null) {
         mediaView.mediaContent = nativeAd.mediaContent
     }
-
 
     nativeAdView.setNativeAd(nativeAd)
 }

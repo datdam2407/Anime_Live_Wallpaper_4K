@@ -67,21 +67,30 @@ class DelogoEffect(
             val prd = product.lowercase()
             val hw = hardware.lowercase()
             return fp.startsWith("generic") ||
-                fp.startsWith("unknown") ||
-                fp.contains("emulator") ||
-                mdl.contains("google_sdk") ||
-                mdl.contains("emulator") ||
-                mdl.contains("android sdk built for") ||
-                mfg.contains("genymotion") ||
-                (brd.startsWith("generic") && dev.startsWith("generic")) ||
-                prd.contains("sdk_gphone") ||
-                prd.contains("emulator") ||
-                prd.contains("simulator") ||
-                hw.contains("goldfish") ||
-                hw.contains("ranchu")
+                    fp.startsWith("unknown") ||
+                    fp.contains("emulator") ||
+                    mdl.contains("google_sdk") ||
+                    mdl.contains("emulator") ||
+                    mdl.contains("android sdk built for") ||
+                    mfg.contains("genymotion") ||
+                    (brd.startsWith("generic") && dev.startsWith("generic")) ||
+                    prd.contains("sdk_gphone") ||
+                    prd.contains("emulator") ||
+                    prd.contains("simulator") ||
+                    hw.contains("goldfish") ||
+                    hw.contains("ranchu")
         }
 
+        /**
+         * Disabled by default because R2 live wallpapers are pre-cleaned via FFmpeg before upload.
+         * Keeping runtime OpenGL/EGL GlEffect off lets Media3 ExoPlayer output Zero-Copy directly
+         * from MediaCodec to the hardware Surface (~20-40% lower GPU & battery draw).
+         */
+        const val ENABLED_BY_DEFAULT: Boolean = false
+
         fun isSupportedOnDevice(): Boolean = !isEmulatorDevice()
+
+        fun shouldEnableRuntimeDelogo(): Boolean = ENABLED_BY_DEFAULT && isSupportedOnDevice()
     }
 }
 

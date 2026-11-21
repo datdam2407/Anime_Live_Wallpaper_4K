@@ -6,6 +6,15 @@ import com.squareup.moshi.JsonClass
 @JsonClass(generateAdapter = true)
 data class WallhavenResponse(
     val data: List<WallhavenItem> = emptyList(),
+    val meta: WallhavenMeta? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class WallhavenMeta(
+    @Json(name = "current_page") val currentPage: Int = 1,
+    @Json(name = "last_page") val lastPage: Int = 1,
+    @Json(name = "per_page") val perPage: Int = 24,
+    val total: Int = 0,
 )
 
 @JsonClass(generateAdapter = true)

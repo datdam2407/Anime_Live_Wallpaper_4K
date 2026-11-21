@@ -3,13 +3,8 @@
 -keepattributes SourceFile,LineNumberTable
 -keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod
 
-# Moshi & Retrofit remote DTOs (Wallhaven, Reddit)
+# Moshi & Retrofit remote DTOs (Wallhaven, Reddit, LiveCatalogApi)
 -keep class com.example.data.remote.** { *; }
-
-# Local JSON DTOs (LiveWallpaperDto.kt -> LiveWallpaperItem & companion serializer)
--keep class com.example.data.local.LiveWallpaperDto { *; }
--keep class com.example.data.local.LiveWallpaperItem { *; }
--keep class com.example.data.local.LiveWallpaperItem$** { *; }
 
 # Type-safe Navigation Compose @Serializable routes
 -keep class com.example.ui.navigation.** { *; }
@@ -32,5 +27,6 @@
 }
 -keep class com.squareup.moshi.** { *; }
 
-
-
+# Keep Live Wallpaper Services under R8
+-keep class com.example.service.AnimeLiveWallpaperService { *; }
+-keep class com.example.service.AnimeLiveWallpaperAlternateService { *; }

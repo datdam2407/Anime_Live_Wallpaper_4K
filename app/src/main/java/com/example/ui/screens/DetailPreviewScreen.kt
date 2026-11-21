@@ -4,6 +4,7 @@ package com.example.ui.screens
 import android.content.Context
 import android.os.Build
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
@@ -96,9 +97,12 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
@@ -150,21 +154,39 @@ fun DetailPreviewScreen(
     onToggleFavorite: (AppWallpaper) -> Unit,
     onDismissAppliedSuccess: () -> Unit,
     onDetailImageViewed: (String) -> Unit = {},
+    totalCountHint: Int? = null,
+    isLoadingFeed: Boolean = false,
+    hasMore: Boolean = false,
+    isLoadingMore: Boolean = false,
+    onLoadMore: () -> Unit = {},
 ) {
     val coroutineScope = rememberCoroutineScope()
 
 
     if (wallpapers.isEmpty()) {
+        BackHandler(onBack = onBack)
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(ObsidianVoid),
             contentAlignment = Alignment.Center,
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("No wallpaper selected", color = InkWhite)
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(onClick = onBack) { Text("Back") }
+            if (isLoadingFeed) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(
+                        color = CrimsonBlade,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(36.dp),
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text("Loading anime wallpapers…", color = InkMuted)
+                }
+            } else {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("No wallpaper selected", color = InkWhite)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(onClick = onBack) { Text("Back") }
+                }
             }
         }
         return
@@ -177,8 +199,9 @@ fun DetailPreviewScreen(
             interval = AdMobConstants.DETAIL_PAGER_NATIVE_AD_INTERVAL,
         )
     }
-    val initialPagerIndex = remember(pagerEntries, initialIndex) {
-        mapWallpaperIndexToPagerPosition(pagerEntries, initialIndex)
+    val clampedInitialIndex = initialIndex.coerceIn(0, (wallpapers.size - 1).coerceAtLeast(0))
+    val initialPagerIndex = remember(pagerEntries, clampedInitialIndex) {
+        mapWallpaperIndexToPagerPosition(pagerEntries, clampedInitialIndex)
     }
     val pagerState = rememberPagerState(
         initialPage = initialPagerIndex,
@@ -211,6 +234,14 @@ fun DetailPreviewScreen(
     val currentPage by remember(pagerState) { derivedStateOf { pagerState.currentPage } }
     val settledPage by remember(pagerState) { derivedStateOf { pagerState.settledPage } }
 
+
+    val latestOnLoadMore by rememberUpdatedState(onLoadMore)
+
+    LaunchedEffect(settledPage, pagerEntries.size, hasMore, isLoadingMore) {
+        if (hasMore && !isLoadingMore && pagerEntries.isNotEmpty() && settledPage >= pagerEntries.size - 6) {
+            latestOnLoadMore()
+        }
+    }
 
     LaunchedEffect(settledPage, pagerEntries) {
         showTargetDialog = false
@@ -372,8 +403,9 @@ fun DetailPreviewScreen(
                             BorderStroke(1.dp, HairlineBorder)
                         },
                     ) {
+                        val displayTotal = maxOf(wallpapers.size, totalCountHint ?: 0)
                         val badgeLabel = if (currentWallpaperPage != null) {
-                            "${currentWallpaperPage.wallpaper.resolutionLabel} • ${currentWallpaperPage.wallpaperIndex + 1}/${wallpapers.size}"
+                            "${currentWallpaperPage.wallpaper.resolutionLabel} • ${currentWallpaperPage.wallpaperIndex + 1}/$displayTotal"
                         } else {
                             "Sponsored • Ad"
                         }
@@ -786,7 +818,7 @@ private fun CarouselWallpaperCard(
     modifier: Modifier = Modifier,
 ) {
     val cardShape = RoundedCornerShape(24.dp)
-    var isMediaReady by remember(item.id, item.imageUrl, item.videoUrl, item.isLive) {
+    var isMediaReady by remember(item.id, item.imageUrl, item.previewVideoUrl, item.videoUrl, item.isLive) {
         mutableStateOf(false)
     }
     val isApplyEnabled = isActive && isMediaReady && !isProcessing
@@ -920,9 +952,22 @@ private fun WallpaperMediaContent(
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
-    if (item.isLive && !item.videoUrl.isNullOrBlank()) {
+    val previewMediaUri = remember(item.id, item.previewVideoUrl, item.videoUrl, item.isLive, context) {
+        if (!item.isLive) {
+            null
+        } else {
+            val appContainer = (context.applicationContext as? com.example.KuroWallApplication)?.container
+            val localFile = appContainer?.liveWallpaperDownloader
+                ?.getLocalFile(item.id)
+                ?.takeIf { it.exists() && it.length() > 0L }
+            localFile?.let { android.net.Uri.fromFile(it).toString() }
+                ?: item.effectivePreviewVideoUrl
+        }
+    }
+    if (item.isLive && !previewMediaUri.isNullOrBlank()) {
         LiveMp4FullScreenPlayer(
-            videoUrl = item.videoUrl,
+            videoUrl = previewMediaUri,
+            fallbackVideoUrl = item.videoUrl,
             thumbnailUrl = item.thumbnailUrl,
             isActive = isActive,
             muted = muted,
@@ -1008,6 +1053,7 @@ private fun WallpaperMediaContent(
 @Composable
 private fun LiveMp4FullScreenPlayer(
     videoUrl: String,
+    fallbackVideoUrl: String? = null,
     thumbnailUrl: String,
     isActive: Boolean,
     muted: Boolean,
@@ -1021,7 +1067,14 @@ private fun LiveMp4FullScreenPlayer(
     var isHostStarted by remember {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
     }
-    var isVideoReady by remember(videoUrl) { mutableStateOf(false) }
+    var useFallbackUrl by remember(videoUrl, fallbackVideoUrl) { mutableStateOf(false) }
+    var playbackFailed by remember(videoUrl, fallbackVideoUrl) { mutableStateOf(false) }
+    val activeVideoUrl = if (useFallbackUrl && !fallbackVideoUrl.isNullOrBlank()) {
+        fallbackVideoUrl
+    } else {
+        videoUrl
+    }
+    var isVideoReady by remember(activeVideoUrl) { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -1039,7 +1092,7 @@ private fun LiveMp4FullScreenPlayer(
 
     val shouldPlay = isActive && isHostStarted
 
-    LaunchedEffect(shouldPlay, videoUrl) {
+    LaunchedEffect(shouldPlay, activeVideoUrl) {
         if (!shouldPlay) {
             isVideoReady = false
             latestOnVideoReadyChanged(false)
@@ -1068,13 +1121,36 @@ private fun LiveMp4FullScreenPlayer(
             modifier = Modifier.fillMaxSize(),
         )
 
-        if (shouldPlay) {
+        if (shouldPlay && !playbackFailed) {
             ActiveExoPlayerOverlay(
-                videoUrl = videoUrl,
+                videoUrl = activeVideoUrl,
                 muted = muted,
                 onReadyChanged = { ready ->
                     isVideoReady = ready
                     latestOnVideoReadyChanged(ready)
+                },
+                onFatalError = { error ->
+                    val canTryFallback = !useFallbackUrl &&
+                            !fallbackVideoUrl.isNullOrBlank() &&
+                            fallbackVideoUrl != activeVideoUrl
+                    if (canTryFallback) {
+                        runCatching {
+                            Log.w(
+                                "LIVE_DEBUG",
+                                "Preview playback failed ($activeVideoUrl), falling back to fullUrl=$fallbackVideoUrl",
+                                error,
+                            )
+                        }
+                        isVideoReady = false
+                        useFallbackUrl = true
+                    } else {
+                        runCatching {
+                            Log.e("LIVE_DEBUG", "Video playback failed permanently for $activeVideoUrl", error)
+                        }
+                        isVideoReady = false
+                        playbackFailed = true
+                        latestOnVideoReadyChanged(false)
+                    }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -1098,13 +1174,14 @@ private fun ActiveExoPlayerOverlay(
     videoUrl: String,
     muted: Boolean,
     onReadyChanged: (Boolean) -> Unit = {},
+    onFatalError: (PlaybackException) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val latestOnReadyChanged by rememberUpdatedState(onReadyChanged)
-    // Enable Media3 GPU DelogoEffect on physical devices; fall back to direct hardware
-    // MediaCodec TextureView output on emulators (EGL_emulation) or after a GL error.
-    var useEffects by remember(videoUrl) { mutableStateOf(DelogoEffect.isSupportedOnDevice()) }
+    val latestOnFatalError by rememberUpdatedState(onFatalError)
+    // Disabled by default for Zero-Copy hardware TextureView output (R2 videos are pre-cleaned via FFmpeg).
+    var useEffects by remember(videoUrl) { mutableStateOf(DelogoEffect.shouldEnableRuntimeDelogo()) }
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
 
     val screenBounds = remember(context) {
@@ -1125,6 +1202,13 @@ private fun ActiveExoPlayerOverlay(
 
     val player = remember(videoUrl, useEffects) {
         val renderersFactory = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(10_000)
+            .setReadTimeoutMs(15_000)
+        val mediaSourceFactory = DefaultMediaSourceFactory(
+            DefaultDataSource.Factory(context, httpDataSourceFactory),
+        )
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(1500, 3000, 500, 1000)
             .setPrioritizeTimeOverSizeThresholds(true)
@@ -1135,6 +1219,7 @@ private fun ActiveExoPlayerOverlay(
             .build()
 
         ExoPlayer.Builder(context, renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .build()
             .apply {
@@ -1148,8 +1233,17 @@ private fun ActiveExoPlayerOverlay(
                 addListener(
                     object : Player.Listener {
                         override fun onPlayerError(error: PlaybackException) {
+                            runCatching {
+                                Log.e(
+                                    "LIVE_DEBUG",
+                                    "ExoPlayer error url=$videoUrl useEffects=$useEffects code=${error.errorCodeName}",
+                                    error,
+                                )
+                            }
                             if (useEffects) {
                                 useEffects = false
+                            } else {
+                                latestOnFatalError(error)
                             }
                         }
                     },

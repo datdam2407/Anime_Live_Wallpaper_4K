@@ -17,12 +17,14 @@ import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -61,6 +63,7 @@ fun FavoritesScreen(
     onOpenDetail: (Int, String) -> Unit,
     onToggleFavorite: (AppWallpaper) -> Unit,
     onExploreClick: () -> Unit,
+    onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var selectedTab by rememberSaveable { mutableStateOf(FavoriteTab.ALL) }
@@ -94,11 +97,28 @@ fun FavoritesScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        text = "Saved Vault",
-                        style = MaterialTheme.typography.headlineLarge,
-                        color = InkWhite,
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (onBack != null) {
+                            IconButton(
+                                onClick = onBack,
+                                modifier = Modifier.testTag("favorites_back_button"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                    contentDescription = "Back to Settings",
+                                    tint = InkWhite,
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Saved Vault",
+                            style = MaterialTheme.typography.headlineLarge,
+                            color = InkWhite,
+                        )
+                    }
                     Surface(
                         color = CrimsonBlade.copy(alpha = 0.16f),
                         shape = RoundedCornerShape(50),

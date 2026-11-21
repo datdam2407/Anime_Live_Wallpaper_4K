@@ -1,6 +1,5 @@
 package com.example.data.remote
 
-
 import android.os.SystemClock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -9,7 +8,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-
 data class RateLimitDistractionPrompt(
     val id: Long,
     val requestCount: Int,
@@ -17,7 +15,6 @@ data class RateLimitDistractionPrompt(
     val funFact: String,
     val breatherSeconds: Int = WallhavenRateLimiter.DEFAULT_BREATHER_SECONDS,
 )
-
 
 /**
  * Sliding-window rate limiter + 40th-request distraction gatekeeper for the Wallhaven API.
@@ -43,7 +40,6 @@ class WallhavenRateLimiter(
         const val DEFAULT_COOLDOWN_MILLIS = 45_000L
         const val DEFAULT_BREATHER_SECONDS = 4
 
-
         /**
          * Monotonic clock immune to NTP sync or user wall-clock changes.
          * Falls back to System.nanoTime() when running in pure JVM unit tests without Robolectric.
@@ -51,7 +47,6 @@ class WallhavenRateLimiter(
         fun defaultMonotonicClock(): Long =
             runCatching { SystemClock.elapsedRealtime() }
                 .getOrElse { System.nanoTime() / 1_000_000L }
-
 
         private val ANIME_BREATHER_FACTS: List<Pair<String, String>> = listOf(
             "Did you know?" to
@@ -65,7 +60,6 @@ class WallhavenRateLimiter(
         )
     }
 
-
     sealed interface AcquireResult {
         data object Allowed : AcquireResult
         data class RateLimited(
@@ -74,7 +68,6 @@ class WallhavenRateLimiter(
         ) : AcquireResult
     }
 
-
     private val mutex = Mutex()
     private val requestTimestamps = ArrayDeque<Long>()
     private var lastRequestAtMs: Long = Long.MIN_VALUE
@@ -82,15 +75,12 @@ class WallhavenRateLimiter(
     private var distractionShownInCurrentWindow: Boolean = false
     private var distractionSequence: Int = 0
 
-
     private val _distractionPrompt = MutableStateFlow<RateLimitDistractionPrompt?>(null)
     val distractionPrompt: StateFlow<RateLimitDistractionPrompt?> = _distractionPrompt.asStateFlow()
-
 
     fun dismissDistractionPrompt() {
         _distractionPrompt.value = null
     }
-
 
     suspend fun tryAcquire(): AcquireResult {
         while (true) {
@@ -99,14 +89,12 @@ class WallhavenRateLimiter(
                 val now = clock()
                 pruneExpiredLocked(now)
 
-
                 if (cooldownUntilMs != Long.MIN_VALUE && now < cooldownUntilMs) {
                     return AcquireResult.RateLimited(
                         retryAfterMs = (cooldownUntilMs - now).coerceAtLeast(1_000L),
                         fromServer429 = true,
                     )
                 }
-
 
                 if (requestTimestamps.size >= maxRequestsPerWindow) {
                     val oldest = requestTimestamps.first()
@@ -116,7 +104,6 @@ class WallhavenRateLimiter(
                         fromServer429 = false,
                     )
                 }
-
 
                 val elapsedSinceLast = if (lastRequestAtMs == Long.MIN_VALUE) Long.MAX_VALUE else now - lastRequestAtMs
                 if (lastRequestAtMs != Long.MIN_VALUE && elapsedSinceLast in 0 until minSpacingMillis) {
@@ -150,7 +137,6 @@ class WallhavenRateLimiter(
         }
     }
 
-
     suspend fun recordServerRateLimit(retryAfterSeconds: Long? = null) {
         mutex.withLock {
             val now = clock()
@@ -167,7 +153,6 @@ class WallhavenRateLimiter(
         }
     }
 
-
     suspend fun remainingQuota(): Int = mutex.withLock {
         val now = clock()
         pruneExpiredLocked(now)
@@ -178,13 +163,11 @@ class WallhavenRateLimiter(
         }
     }
 
-
     suspend fun activeRequestsInWindow(): Int = mutex.withLock {
         val now = clock()
         pruneExpiredLocked(now)
         requestTimestamps.size
     }
-
 
     private fun pruneExpiredLocked(now: Long) {
         val cutoff = now - windowMillis

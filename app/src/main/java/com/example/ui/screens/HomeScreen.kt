@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -24,8 +23,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
@@ -44,7 +41,6 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.PlayCircleFilled
-import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.WarningAmber
@@ -69,6 +65,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -105,10 +102,13 @@ import com.example.domain.model.AnimeCatalog
 import com.example.domain.model.AppWallpaper
 import com.example.domain.model.WallpaperFilter
 import com.example.ui.components.FilterBottomSheet
+import com.example.ui.components.LiveCatalogFilterSection
 import com.example.ui.components.PremiumGoldBadge
 import com.example.ui.components.PremiumGoldBorderBrush
+import com.example.ui.components.SearchSuggestionStrip
 import com.example.ui.components.ShimmerBox
 import com.example.ui.components.SilverBorderBrush
+import com.example.ui.components.StaticCatalogFilterSection
 import com.example.ui.components.WallpaperStaggeredCard
 import com.example.ui.state.FeedStatus
 import com.example.ui.state.HomeUiState
@@ -131,13 +131,13 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
-
 @Composable
 fun HomeScreen(
     uiState: HomeUiState,
     favoriteIdsState: State<Set<String>>,
     onSearchInputChange: (String) -> Unit,
     onSubmitSearch: () -> Unit,
+    onSelectSuggestion: (String) -> Unit,
     onSelectTrendingTopic: (String) -> Unit,
     onSelectTab: (Boolean) -> Unit,
     onApplyFilter: (WallpaperFilter) -> Unit,
@@ -145,11 +145,11 @@ fun HomeScreen(
     onLoadMore: () -> Unit,
     onOpenDetail: (Int) -> Unit,
     onToggleFavorite: (AppWallpaper) -> Unit,
+    scrollToTopTick: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     var showFilterSheet by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
-
 
     if (showFilterSheet) {
         FilterBottomSheet(
@@ -158,7 +158,6 @@ fun HomeScreen(
             onApply = onApplyFilter,
         )
     }
-
 
     BoxWithConstraints(
         modifier = modifier
@@ -171,11 +170,11 @@ fun HomeScreen(
             else -> 2
         }
 
-
         Column(modifier = Modifier.fillMaxSize()) {
             // Header: Search Bar + Filter Icon
             HomeSearchHeader(
                 query = uiState.searchInput,
+                isLiveTab = uiState.isLiveTab,
                 activeFilterLabel = uiState.filter.resolution.label,
                 onQueryChange = onSearchInputChange,
                 onSearch = {
@@ -188,6 +187,14 @@ fun HomeScreen(
                 onOpenFilter = { showFilterSheet = true },
             )
 
+            // Instant Search Autocomplete Suggestions (Category / #Tag / Title)
+            SearchSuggestionStrip(
+                suggestions = uiState.searchSuggestions,
+                onSelectSuggestion = { suggestion ->
+                    focusManager.clearFocus()
+                    onSelectSuggestion(suggestion.label)
+                },
+            )
 
             // 2 Tabs: Static (Tĩnh) | Live (Động)
             StaticLiveTabs(
@@ -195,7 +202,6 @@ fun HomeScreen(
                 onSelectTab = onSelectTab,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
             )
-
 
             val gridEntries = remember(uiState.feedStatus) {
                 val items = (uiState.feedStatus as? FeedStatus.Success)?.items.orEmpty()
@@ -209,8 +215,35 @@ fun HomeScreen(
                 }
             }
 
-
             val gridState = rememberLazyStaggeredGridState()
+            var lastHandledFeedScrollSignal by rememberSaveable { mutableIntStateOf(uiState.scrollToTopSignal) }
+            var lastHandledNavScrollTick by rememberSaveable { mutableIntStateOf(scrollToTopTick) }
+
+            // Snap cleanly to the top whenever the user switches 4K Artworks <-> Live Wallpapers,
+            // searches, picks a category/#tag/filter, or refreshes. Back-from-Detail preserves position.
+            LaunchedEffect(uiState.scrollToTopSignal) {
+                if (uiState.scrollToTopSignal != lastHandledFeedScrollSignal) {
+                    lastHandledFeedScrollSignal = uiState.scrollToTopSignal
+                    if (gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0) {
+                        gridState.scrollToItem(0, 0)
+                    }
+                }
+            }
+
+            // Return to top when the user taps the Discover tab in bottom navigation or navigation rail.
+            LaunchedEffect(scrollToTopTick) {
+                if (scrollToTopTick != lastHandledNavScrollTick) {
+                    lastHandledNavScrollTick = scrollToTopTick
+                    if (gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0) {
+                        if (gridState.firstVisibleItemIndex <= 15) {
+                            gridState.animateScrollToItem(0)
+                        } else {
+                            gridState.scrollToItem(0, 0)
+                        }
+                    }
+                }
+            }
+
             val currentFeedCountState = rememberUpdatedState(
                 (uiState.feedStatus as? FeedStatus.Success)?.items?.size ?: 0,
             )
@@ -223,13 +256,11 @@ fun HomeScreen(
                 mutableIntStateOf(-1)
             }
 
-
             LaunchedEffect(uiState.isRefreshing) {
                 if (uiState.isRefreshing) {
                     lastLoadMoreTriggeredAtCount = -1
                 }
             }
-
 
             LaunchedEffect(gridState, uiState.activeQuery, uiState.isLiveTab, uiState.filter) {
                 snapshotFlow {
@@ -253,12 +284,10 @@ fun HomeScreen(
                     }
             }
 
-
             val coroutineScope = rememberCoroutineScope()
             val showScrollToTop by remember(gridState) {
                 derivedStateOf { gridState.firstVisibleItemIndex > 15 }
             }
-
 
             // Body: Auto-scrolling Trending Carousel + Trending Chips + Staggered Grid
             Box(
@@ -276,7 +305,7 @@ fun HomeScreen(
                         .fillMaxSize()
                         .testTag("home_staggered_grid"),
                 ) {
-                    item(span = StaggeredGridItemSpan.FullLine) {
+                    item(key = "home_trending_carousel", span = StaggeredGridItemSpan.FullLine) {
                         TrendingCarouselBanner(
                             banners = uiState.trendingBanners,
                             onBannerClick = { index, banner ->
@@ -297,22 +326,45 @@ fun HomeScreen(
                         )
                     }
 
-
-                    item(span = StaggeredGridItemSpan.FullLine) {
-                        TrendingTopicChips(
-                            activeQuery = uiState.activeQuery,
-                            onSelectTopic = onSelectTrendingTopic,
-                            onRefresh = onRefresh,
-                        )
+                    item(key = "home_catalog_filter_section", span = StaggeredGridItemSpan.FullLine) {
+                        val currentResultCount = (uiState.feedStatus as? FeedStatus.Success)?.items?.size
+                        if (uiState.isLiveTab) {
+                            LiveCatalogFilterSection(
+                                activeQuery = uiState.activeQuery,
+                                facets = uiState.liveCatalogFacets,
+                                resultCount = currentResultCount,
+                                onSelectTopic = { topic ->
+                                    focusManager.clearFocus()
+                                    onSelectTrendingTopic(topic)
+                                },
+                                onClearFilter = {
+                                    focusManager.clearFocus()
+                                    onSelectTrendingTopic("All")
+                                },
+                                onRefresh = onRefresh,
+                            )
+                        } else {
+                            StaticCatalogFilterSection(
+                                activeQuery = uiState.activeQuery,
+                                resultCount = currentResultCount,
+                                onSelectTopic = { topic ->
+                                    focusManager.clearFocus()
+                                    onSelectTrendingTopic(topic)
+                                },
+                                onClearFilter = {
+                                    focusManager.clearFocus()
+                                    onSelectTrendingTopic("All")
+                                },
+                                onRefresh = onRefresh,
+                            )
+                        }
                     }
-
 
                     if (!uiState.bannerMessage.isNullOrBlank()) {
                         item(span = StaggeredGridItemSpan.FullLine) {
                             RateLimitBanner(message = uiState.bannerMessage)
                         }
                     }
-
 
                     when (val status = uiState.feedStatus) {
                         FeedStatus.Loading -> {
@@ -327,18 +379,16 @@ fun HomeScreen(
                             }
                         }
 
-
                         is FeedStatus.Error -> {
                             item(span = StaggeredGridItemSpan.FullLine) {
                                 EmptyFeedCard(
                                     message = status.message,
                                     isLive = uiState.isLiveTab,
                                     onRetry = onRefresh,
-                                    onBrowseAll = { onSelectTrendingTopic("anime") },
+                                    onBrowseAll = { onSelectTrendingTopic("All") },
                                 )
                             }
                         }
-
 
                         is FeedStatus.Success -> {
                             itemsIndexed(
@@ -365,7 +415,6 @@ fun HomeScreen(
                                         )
                                     }
 
-
                                     is WallpaperGridEntry.WallpaperItem -> {
                                         val index = entry.originalIndex
                                         val wallpaper = entry.wallpaper
@@ -390,7 +439,6 @@ fun HomeScreen(
                                     }
                                 }
                             }
-
 
                             if (uiState.isLoadingMore || uiState.hasMore) {
                                 item(span = StaggeredGridItemSpan.FullLine) {
@@ -423,7 +471,6 @@ fun HomeScreen(
                         }
                     }
                 }
-
 
                 // Top-Center "Scroll to Top" Floating Action Button when deep in the feed (> 15 items)
                 androidx.compose.animation.AnimatedVisibility(
@@ -464,10 +511,10 @@ fun HomeScreen(
     }
 }
 
-
 @Composable
 private fun HomeSearchHeader(
     query: String,
+    isLiveTab: Boolean,
     activeFilterLabel: String,
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
@@ -487,21 +534,27 @@ private fun HomeSearchHeader(
                 .height(48.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(ObsidianSurfaceElevated)
-                .border(1.dp, HairlineBorder, RoundedCornerShape(16.dp))
-                .padding(horizontal = 14.dp),
+                .border(
+                    width = 1.dp,
+                    color = if (isLiveTab) PremiumGold.copy(alpha = 0.35f) else HairlineBorder,
+                    shape = RoundedCornerShape(16.dp),
+                )
+                .padding(start = 14.dp, end = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 imageVector = Icons.Rounded.Search,
                 contentDescription = "Search anime",
-                tint = CrimsonBlade,
+                tint = if (isLiveTab) PremiumGold else CrimsonBlade,
                 modifier = Modifier.size(20.dp),
             )
             Spacer(modifier = Modifier.width(10.dp))
             Box(modifier = Modifier.weight(1f)) {
                 if (query.isEmpty()) {
                     Text(
-                        text = stringResource(id = R.string.search_hint),
+                        text = stringResource(
+                            id = if (isLiveTab) R.string.search_hint_live else R.string.search_hint,
+                        ),
                         style = MaterialTheme.typography.bodyMedium,
                         color = InkMuted,
                         maxLines = 1,
@@ -513,7 +566,7 @@ private fun HomeSearchHeader(
                     onValueChange = onQueryChange,
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = InkWhite),
-                    cursorBrush = SolidColor(CrimsonBlade),
+                    cursorBrush = SolidColor(if (isLiveTab) PremiumGold else CrimsonBlade),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { onSearch() }),
                     modifier = Modifier
@@ -524,7 +577,9 @@ private fun HomeSearchHeader(
             if (query.isNotEmpty()) {
                 IconButton(
                     onClick = onClear,
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("home_search_clear"),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
@@ -535,7 +590,6 @@ private fun HomeSearchHeader(
                 }
             }
         }
-
 
         FilledTonalIconButton(
             onClick = onOpenFilter,
@@ -557,7 +611,6 @@ private fun HomeSearchHeader(
         }
     }
 }
-
 
 @Composable
 private fun StaticLiveTabs(
@@ -626,7 +679,6 @@ private fun StaticLiveTabs(
             }
         }
 
-
         val liveSelected = isLiveTab
         val liveTabShape = RoundedCornerShape(12.dp)
         Box(
@@ -681,7 +733,6 @@ private fun StaticLiveTabs(
     }
 }
 
-
 @Composable
 private fun TrendingCarouselBanner(
     banners: List<AppWallpaper>,
@@ -690,7 +741,6 @@ private fun TrendingCarouselBanner(
     val pageCount = if (banners.isNotEmpty()) banners.size else AnimeCatalog.trendingTopics.size
     val pagerState = rememberPagerState(pageCount = { pageCount })
     val lifecycleOwner = LocalLifecycleOwner.current
-
 
     LaunchedEffect(pagerState, pageCount, lifecycleOwner) {
         if (pageCount <= 1) return@LaunchedEffect
@@ -708,12 +758,10 @@ private fun TrendingCarouselBanner(
         }
     }
 
-
     val context = LocalContext.current
     val density = LocalDensity.current
     val bannerHeightPx = remember(density) { with(density) { 176.dp.roundToPx() } }
     val bannerWidthPx = remember(density) { with(density) { 420.dp.roundToPx() } }
-
 
     Column(modifier = Modifier.fillMaxWidth()) {
         HorizontalPager(
@@ -729,7 +777,6 @@ private fun TrendingCarouselBanner(
         ) { page ->
             val banner = banners.getOrNull(page)
             val topicTitle = AnimeCatalog.trendingTopics.getOrNull(page)?.title ?: "Trending Anime"
-
 
             Box(
                 modifier = Modifier
@@ -767,7 +814,6 @@ private fun TrendingCarouselBanner(
                     )
                 }
 
-
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -779,7 +825,6 @@ private fun TrendingCarouselBanner(
                             ),
                         ),
                 )
-
 
                 Column(
                     modifier = Modifier
@@ -810,9 +855,7 @@ private fun TrendingCarouselBanner(
                         }
                     }
 
-
                     Spacer(modifier = Modifier.height(10.dp))
-
 
                     Text(
                         text = banner?.animeSeries?.takeIf {
@@ -830,9 +873,7 @@ private fun TrendingCarouselBanner(
             }
         }
 
-
         Spacer(modifier = Modifier.height(10.dp))
-
 
         // Carousel dot indicators
         Row(
@@ -854,91 +895,6 @@ private fun TrendingCarouselBanner(
         }
     }
 }
-
-
-@Composable
-private fun TrendingTopicChips(
-    activeQuery: String,
-    onSelectTopic: (String) -> Unit,
-    onRefresh: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        LazyRow(
-            modifier = Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            item {
-                val isHome = activeQuery == com.example.data.repository.WallpaperRepository.HOME_TRENDING_KEY
-                Surface(
-                    color = if (isHome) CrimsonBlade else ObsidianSurfaceElevated,
-                    shape = RoundedCornerShape(50),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (isHome) CrimsonBlade else HairlineBorder,
-                    ),
-                    modifier = Modifier
-                        .height(36.dp)
-                        .clickable { onSelectTopic("anime") },
-                ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier.padding(horizontal = 14.dp),
-                    ) {
-                        Text(
-                            text = "All",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (isHome) InkWhite else InkMuted,
-                        )
-                    }
-                }
-            }
-            items(
-                items = AnimeCatalog.trendingTopics,
-                key = { it.title },
-            ) { topic ->
-                val selected = activeQuery.equals(topic.title, ignoreCase = true) ||
-                        activeQuery.equals(topic.query, ignoreCase = true)
-                Surface(
-                    color = if (selected) CrimsonBlade else ObsidianSurfaceElevated,
-                    shape = RoundedCornerShape(50),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (selected) CrimsonBlade else HairlineBorder,
-                    ),
-                    modifier = Modifier
-                        .height(36.dp)
-                        .clickable { onSelectTopic(topic.title) },
-                ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier.padding(horizontal = 14.dp),
-                    ) {
-                        Text(
-                            text = topic.title,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (selected) InkWhite else InkMuted,
-                        )
-                    }
-                }
-            }
-        }
-        Spacer(modifier = Modifier.width(6.dp))
-        IconButton(
-            onClick = onRefresh,
-            modifier = Modifier.size(40.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Refresh,
-                contentDescription = "Refresh wallpapers",
-                tint = InkMuted,
-            )
-        }
-    }
-}
-
 
 @Composable
 private fun RateLimitBanner(message: String) {
@@ -967,7 +923,6 @@ private fun RateLimitBanner(message: String) {
         }
     }
 }
-
 
 @Composable
 private fun EmptyFeedCard(

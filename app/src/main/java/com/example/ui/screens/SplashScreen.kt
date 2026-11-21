@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
@@ -58,7 +57,6 @@ import com.example.ui.theme.ObsidianVoid
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-
 // Wallhaven https://wallhaven.cc/w/5g12j5
 const val SPLASH_WALLPAPER_THUMB_URL =
     "https://th.wallhaven.cc/lg/5g/5g12j5.jpg"
@@ -67,11 +65,9 @@ const val SPLASH_WALLPAPER_JPG_URL =
 const val SPLASH_WALLPAPER_PNG_URL =
     "https://w.wallhaven.cc/full/5g/wallhaven-5g12j5.png"
 
-
 const val SPLASH_DURATION_MS = 5_000L
 private const val SPLASH_HANDOFF_ANIMATION_MS = 400L
 private const val SPLASH_PRELOAD_WINDOW_MS = SPLASH_DURATION_MS - SPLASH_HANDOFF_ANIMATION_MS
-
 
 @Composable
 fun SplashScreen(
@@ -83,10 +79,8 @@ fun SplashScreen(
     val progress = remember { Animatable(0.08f) }
     val imageZoom = remember { Animatable(1.0f) }
 
-
     val latestPreloadComplete by rememberUpdatedState(isPreloadComplete)
     val latestOnFinished by rememberUpdatedState(onFinished)
-
 
     LaunchedEffect(Unit) {
         val startedAt = System.currentTimeMillis()
@@ -98,7 +92,6 @@ fun SplashScreen(
         }
         contentAlpha.animateTo(1f, animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing))
         progress.animateTo(0.38f, animationSpec = tween(durationMillis = 900, easing = FastOutSlowInEasing))
-
 
         // Hold inside the 5-second preload window while initial API feed, thumbnails, and Ads warm up
         while (true) {
@@ -118,7 +111,6 @@ fun SplashScreen(
             delay(50L)
         }
 
-
         progress.animateTo(1f, animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing))
         // Smooth pre-handoff flourish during the final ~160ms of the 5,000ms window
         launch {
@@ -134,7 +126,6 @@ fun SplashScreen(
         latestOnFinished()
     }
 
-
     val context = LocalContext.current
     val fullResCandidates = remember {
         listOf(
@@ -145,7 +136,6 @@ fun SplashScreen(
     }
     var candidateIndex by remember { mutableIntStateOf(0) }
     val activeFullUrl = fullResCandidates[candidateIndex.coerceAtMost(fullResCandidates.lastIndex)]
-
 
     val thumbRequest = remember(context) {
         ImageRequest.Builder(context)
@@ -159,7 +149,6 @@ fun SplashScreen(
             .build()
     }
 
-
     val fullRequest = remember(context, activeFullUrl) {
         ImageRequest.Builder(context)
             .data(activeFullUrl)
@@ -172,7 +161,6 @@ fun SplashScreen(
             .crossfade(220)
             .build()
     }
-
 
     Box(
         modifier = Modifier
@@ -194,7 +182,6 @@ fun SplashScreen(
                     ),
                 ),
         )
-
 
         // Subtle Ken Burns zoom motion on Wallhaven 5g12j5 artwork
         Box(
@@ -221,7 +208,6 @@ fun SplashScreen(
             )
         }
 
-
         // Top atmospheric gradient scrim so title & progress bar remain sharp and high-contrast
         Box(
             modifier = Modifier
@@ -239,7 +225,6 @@ fun SplashScreen(
                 ),
         )
 
-
         // Bottom atmospheric gradient scrim framing "Loading..." cleanly
         Box(
             modifier = Modifier
@@ -256,7 +241,6 @@ fun SplashScreen(
                     ),
                 ),
         )
-
 
         // Top title & glowing horizontal loading bar
         Column(
@@ -283,9 +267,7 @@ fun SplashScreen(
                 modifier = Modifier.testTag("splash_headline"),
             )
 
-
             Spacer(modifier = Modifier.height(6.dp))
-
 
             Text(
                 text = stringResource(id = R.string.app_name),
@@ -296,9 +278,7 @@ fun SplashScreen(
                 textAlign = TextAlign.Center,
             )
 
-
             Spacer(modifier = Modifier.height(18.dp))
-
 
             Box(
                 modifier = Modifier
@@ -332,7 +312,6 @@ fun SplashScreen(
             }
         }
 
-
         // Bottom "Loading..." label
         Text(
             text = stringResource(id = R.string.splash_loading),
@@ -355,6 +334,3 @@ fun SplashScreen(
         )
     }
 }
-
-
-

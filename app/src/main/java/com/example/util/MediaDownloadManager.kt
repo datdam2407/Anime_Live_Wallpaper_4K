@@ -42,13 +42,43 @@ class MediaDownloadManager(
     companion object {
         private const val PREF_NAME = "live_wallpaper_prefs"
         private const val KEY_ACTIVE_FILE = "active_video_filename"
+        private const val KEY_ACTIVE_FILE_PATH = "active_video_filepath"
+        private const val KEY_ACTIVE_UPDATED_AT = "active_video_updated_at"
         const val FILE_SLOT_A = "wallpaper_a.mp4"
         const val FILE_SLOT_B = "wallpaper_b.mp4"
         const val ACTION_RELOAD_WALLPAPER = "com.example.ACTION_RELOAD_WALLPAPER"
         private val SAFE_ID_REGEX = Regex("[^A-Za-z0-9_-]")
 
+        /**
+         * Points [com.example.service.AnimeLiveWallpaperService] directly to a locally downloaded
+         * R2 live wallpaper file (e.g. `filesDir/live_wallpapers/kuro_0001.mp4`) and broadcasts
+         * an immediate reload without duplicating the MP4 on disk.
+         */
+        fun setActiveLiveVideoFile(context: Context, file: File) {
+            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putString(KEY_ACTIVE_FILE_PATH, file.absolutePath)
+                .putLong(KEY_ACTIVE_UPDATED_AT, System.currentTimeMillis())
+                .commit()
+            context.sendBroadcast(
+                Intent(ACTION_RELOAD_WALLPAPER).setPackage(context.packageName),
+            )
+        }
+
+        fun getActiveLiveUpdatedAt(context: Context): Long {
+            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            return prefs.getLong(KEY_ACTIVE_UPDATED_AT, 0L)
+        }
+
         fun getActiveLiveVideoFile(context: Context): File {
             val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val directPath = prefs.getString(KEY_ACTIVE_FILE_PATH, null)?.trim().orEmpty()
+            if (directPath.isNotEmpty()) {
+                val directFile = File(directPath)
+                if (directFile.exists() && directFile.length() > 0L) {
+                    return directFile
+                }
+            }
             val rawName = prefs.getString(KEY_ACTIVE_FILE, FILE_SLOT_A)
             val fileName = if (rawName == FILE_SLOT_B) FILE_SLOT_B else FILE_SLOT_A
             val preferredFile = File(context.filesDir, fileName)
@@ -254,7 +284,11 @@ class MediaDownloadManager(
                     }
 
                     // Commit synchronously before broadcasting reload so WallpaperService reads the new slot.
-                    prefs.edit().putString(KEY_ACTIVE_FILE, nextFileName).commit()
+                    prefs.edit()
+                        .putString(KEY_ACTIVE_FILE, nextFileName)
+                        .putString(KEY_ACTIVE_FILE_PATH, finalFile.absolutePath)
+                        .putLong(KEY_ACTIVE_UPDATED_AT, System.currentTimeMillis())
+                        .commit()
 
                     context.sendBroadcast(
                         Intent(ACTION_RELOAD_WALLPAPER).setPackage(context.packageName),

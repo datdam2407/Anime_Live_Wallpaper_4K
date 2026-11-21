@@ -69,6 +69,36 @@ open class AnimeLiveWallpaperService : WallpaperService() {
                 }
             }
         }
+
+        /**
+         * Deterministically picks the newest valid local MP4 between DataStore ([configuredPath])
+         * and SharedPreferences ([prefsActiveFile]).
+         * - If DataStore was updated at or after SharedPreferences (e.g., Step 3 Apply writing
+         *   directly to DataStore), [configuredPath] wins so the service never plays a stale slot.
+         * - If SharedPreferences was committed more recently (e.g., immediate broadcast reload
+         *   before DataStore finishes flushing), [prefsActiveFile] wins.
+         */
+        internal fun resolvePreferredLiveFile(
+            configuredPath: String?,
+            configuredUpdatedAt: Long,
+            prefsActiveFile: File?,
+            prefsUpdatedAt: Long,
+        ): File? {
+            val dataStoreFile = configuredPath
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { File(it) }
+                ?.takeIf { it.exists() && it.length() > 0L }
+            val managerFile = prefsActiveFile?.takeIf { it.exists() && it.length() > 0L }
+
+            return when {
+                dataStoreFile != null && managerFile != null -> {
+                    if (configuredUpdatedAt >= prefsUpdatedAt) dataStoreFile else managerFile
+                }
+                dataStoreFile != null -> dataStoreFile
+                else -> managerFile
+            }
+        }
     }
 
     override fun onCreateEngine(): Engine = ExoWallpaperEngine()
@@ -82,10 +112,11 @@ open class AnimeLiveWallpaperService : WallpaperService() {
 
         private var currentMediaUri: String? = null
         private var currentFile: File? = null
+        private var latestDataStorePath: String? = null
+        private var latestDataStoreUpdatedAt: Long = 0L
         private var currentMuted: Boolean = true
-        // Enables Media3 GPU DelogoEffect on physical devices and uses direct MediaCodec
-        // surface output on emulators (EGL_emulation) or if VideoFrameProcessor ever errors.
-        private var effectsEnabled: Boolean = DelogoEffect.isSupportedOnDevice()
+        // Disabled by default for Zero-Copy hardware Surface output (R2 videos are pre-cleaned via FFmpeg).
+        private var effectsEnabled: Boolean = DelogoEffect.shouldEnableRuntimeDelogo()
         private var retriedAfterError: Boolean = false
         private var isReceiverRegistered: Boolean = false
 
@@ -182,9 +213,9 @@ open class AnimeLiveWallpaperService : WallpaperService() {
         }
 
         private fun onExternalWallpaperUpdated() {
-            val activeFile = resolveLatestLocalFile(configuredPath = null)
+            val activeFile = resolveLatestLocalFile()
             currentFile = activeFile
-            effectsEnabled = DelogoEffect.isSupportedOnDevice()
+            effectsEnabled = DelogoEffect.shouldEnableRuntimeDelogo()
             retriedAfterError = false
             if (engineVisible && surfaceWidth > 0 && surfaceHeight > 0) {
                 startOrReloadPlayback(forceReload = true)
@@ -211,8 +242,15 @@ open class AnimeLiveWallpaperService : WallpaperService() {
                         currentMuted = muted
                         val updatedChanged = lastObservedUpdatedAt != -1L && lastObservedUpdatedAt != updatedAt
                         lastObservedUpdatedAt = updatedAt
+                        latestDataStorePath = path
+                        latestDataStoreUpdatedAt = updatedAt
 
-                        val resolvedFile = resolveLatestLocalFile(path)
+                        val previousPath = currentFile?.absolutePath
+                        val resolvedFile = resolveLatestLocalFile(
+                            configuredPath = path,
+                            configuredUpdatedAt = updatedAt,
+                        )
+                        val fileChanged = resolvedFile != null && resolvedFile.absolutePath != previousPath
                         if (resolvedFile != null) {
                             currentFile = resolvedFile
                         }
@@ -224,11 +262,11 @@ open class AnimeLiveWallpaperService : WallpaperService() {
                                 val (w, h) = getPhysicalOrSurfaceResolution()
                                 exo.trackSelectionParameters = buildTrackSelectionParams(w, h, muted)
                             }
-                            if (updatedChanged && resolvedFile != null && engineVisible) {
+                            if ((updatedChanged || fileChanged) && resolvedFile != null && engineVisible) {
                                 swapMediaOnActivePlayer(exo, resolvedFile, forceReload = true)
                             }
                         } else if (engineVisible && surfaceWidth > 0 && surfaceHeight > 0 && resolvedFile != null) {
-                            startOrReloadPlayback(forceReload = updatedChanged)
+                            startOrReloadPlayback(forceReload = updatedChanged || fileChanged)
                         }
                     }
             }
@@ -248,7 +286,7 @@ open class AnimeLiveWallpaperService : WallpaperService() {
                 }
             }
 
-            val fileToPlay = resolveLatestLocalFile(currentFile?.absolutePath) ?: return
+            val fileToPlay = resolveLatestLocalFile() ?: return
             currentFile = fileToPlay
 
             val existing = exoPlayer
@@ -368,7 +406,7 @@ open class AnimeLiveWallpaperService : WallpaperService() {
                 delay(delayMs)
                 retryJob = null
                 val holder = surfaceHolder ?: return@launch
-                val file = resolveLatestLocalFile(currentFile?.absolutePath) ?: return@launch
+                val file = resolveLatestLocalFile() ?: return@launch
                 if (engineVisible && holder.surface?.isValid == true && surfaceWidth > 0 && surfaceHeight > 0) {
                     createAndStartPlayer(holder, file)
                 }
@@ -406,18 +444,18 @@ open class AnimeLiveWallpaperService : WallpaperService() {
                 .build()
         }
 
-        private fun resolveLatestLocalFile(configuredPath: String?): File? {
+        private fun resolveLatestLocalFile(
+            configuredPath: String? = latestDataStorePath,
+            configuredUpdatedAt: Long = latestDataStoreUpdatedAt,
+        ): File? {
             val activeFile = MediaDownloadManager.getActiveLiveVideoFile(applicationContext)
-            if (activeFile.exists() && activeFile.length() > 0L) {
-                return activeFile
-            }
-            if (!configuredPath.isNullOrBlank()) {
-                val configured = File(configuredPath)
-                if (configured.exists() && configured.length() > 0L) {
-                    return configured
-                }
-            }
-            return null
+            val prefsUpdatedAt = MediaDownloadManager.getActiveLiveUpdatedAt(applicationContext)
+            return resolvePreferredLiveFile(
+                configuredPath = configuredPath,
+                configuredUpdatedAt = configuredUpdatedAt,
+                prefsActiveFile = activeFile,
+                prefsUpdatedAt = prefsUpdatedAt,
+            )
         }
 
         private fun registerReloadReceiver() {

@@ -1,6 +1,7 @@
 package com.example.ui.state
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -15,18 +16,27 @@ import com.example.data.local.UserSettings
 import com.example.data.repository.WallpaperRepository
 import com.example.domain.model.AnimeCatalog
 import com.example.domain.model.AnimeCategory
+import com.example.domain.model.AnimeSeriesPreview
 import com.example.domain.model.AppWallpaper
+import com.example.domain.model.CategoryCoverCandidate
+import com.example.domain.model.LiveCatalogFacets
+import com.example.domain.model.LiveSearchSuggestion
 import com.example.domain.model.ResolutionTier
+import com.example.domain.model.SearchSuggestionType
 import com.example.domain.model.WallpaperFilter
 import com.example.domain.model.WallpaperTarget
+import com.example.ui.components.CURATED_STATIC_TAGS
 import com.example.ui.screens.SPLASH_WALLPAPER_JPG_URL
 import com.example.ui.screens.SPLASH_WALLPAPER_THUMB_URL
 import com.example.data.remote.RateLimitDistractionPrompt
-import com.example.util.LiveDownloadState
+import com.example.util.MediaDownloadManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,11 +46,17 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.random.Random
 
 sealed interface FeedStatus {
     data object Loading : FeedStatus
@@ -65,6 +81,19 @@ data class HomeUiState(
     val liveDownloadProgress: Int? = null,
     val appliedSuccessTarget: String? = null,
     val isSplashPreloadComplete: Boolean = false,
+    val liveCatalogFacets: LiveCatalogFacets = LiveCatalogFacets(),
+    val searchSuggestions: List<LiveSearchSuggestion> = emptyList(),
+    val scrollToTopSignal: Int = 0,
+)
+
+data class CollectionDetailState(
+    val category: AnimeCategory? = null,
+    val items: List<AppWallpaper> = emptyList(),
+    val totalCount: Int = 0,
+    val currentPage: Int = 1,
+    val hasMore: Boolean = false,
+    val isLoadingInitial: Boolean = false,
+    val isLoadingMore: Boolean = false,
 )
 
 sealed interface UiEvent {
@@ -81,9 +110,9 @@ sealed interface UiEvent {
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val container = (application as KuroWallApplication).container
     private val repository = container.wallpaperRepository
+    private val liveWallpaperRepository = container.liveWallpaperRepository
     private val settingsStore = container.settingsDataStore
     private val bitmapCropper = container.bitmapCropper
-    private val mediaDownloadManager = container.mediaDownloadManager
     private val interstitialAdManager = container.interstitialAdManager
     private val nativeAdManager = container.nativeAdManager
     private val consentManager = container.consentManager
@@ -97,7 +126,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var feedJob: Job? = null
     private var loadMoreJob: Job? = null
     private var searchDebounceJob: Job? = null
+    private var searchCoverWarmupJob: Job? = null
+    private var searchReshuffleJob: Job? = null
+    private var categoryPreviewJob: Job? = null
+    private var collectionDetailJob: Job? = null
+    private var collectionLoadMoreJob: Job? = null
     private var startupPrefetchStarted = false
+    private val categoryStaticPools = ConcurrentHashMap<String, List<String>>()
+    private val _searchCategoryCovers = MutableStateFlow<Map<String, CategoryCoverCandidate>>(emptyMap())
+    val searchCategoryCovers: StateFlow<Map<String, CategoryCoverCandidate>> = _searchCategoryCovers.asStateFlow()
+    private val _animeCategoryPreviews = MutableStateFlow<Map<String, AnimeSeriesPreview>>(emptyMap())
+    val animeCategoryPreviews: StateFlow<Map<String, AnimeSeriesPreview>> = _animeCategoryPreviews.asStateFlow()
+    private val _collectionDetailState = MutableStateFlow(CollectionDetailState())
+    val collectionDetailState: StateFlow<CollectionDetailState> = _collectionDetailState.asStateFlow()
     private val _events = MutableSharedFlow<UiEvent>()
     val events: SharedFlow<UiEvent> = _events.asSharedFlow()
 
@@ -113,6 +154,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Expose _rawState directly without cloning lists on every favorite toggle;
     // favorite state is observed independently at the item level.
     val homeState: StateFlow<HomeUiState> = _rawState.asStateFlow()
+
+    val searchLiveFacets: StateFlow<LiveCatalogFacets> = _rawState
+        .map { it.liveCatalogFacets }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LiveCatalogFacets())
+
+    val searchTrendingBanners: StateFlow<List<AppWallpaper>> = _rawState
+        .map { it.trendingBanners }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val rateLimitDistraction: StateFlow<RateLimitDistractionPrompt?> =
         wallhavenRateLimiter.distractionPrompt
@@ -133,6 +184,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AnimeCatalog.allTwoHundred)
 
     init {
+        viewModelScope.launch {
+            liveWallpaperRepository.catalogFacets.collect { facets ->
+                _rawState.update { state ->
+                    val refreshedSuggestions = if (state.isLiveTab && state.searchInput.isNotBlank()) {
+                        computeSearchSuggestions(state.searchInput, isLiveTab = true)
+                    } else {
+                        state.searchSuggestions
+                    }
+                    state.copy(
+                        liveCatalogFacets = facets,
+                        searchSuggestions = refreshedSuggestions,
+                    )
+                }
+                launch(Dispatchers.Default) {
+                    fillMissingSearchCategoryCovers()
+                }
+            }
+        }
         runSplashPreloadQueue()
     }
 
@@ -141,16 +210,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 1. Waits for Google UMP GDPR/CCPA consent before preloading Interstitial & Native Ads on Main.
      * 2. Warms Live MP4 catalog, prunes expired Room cache, and pre-decodes Splash hero art.
      * 3. Fetches Page 1 of the initial Home API feed + warms Home & Carousel thumbnails,
-     *    then queues Page 2 trending prefetch in the background.
+     *    then queues Page 2 trending prefetch & Search category cover pre-warming in the background.
      */
     private fun runSplashPreloadQueue() {
         viewModelScope.launch {
-            // Stage 1: Start local warmups immediately; gate AdMob preloading strictly on UMP consent
+            // Stage 1: Start local warmups immediately; gate Interstitial preload strictly on UMP consent.
+            // Native Ad preloading is deferred until Home/Categories feed loads to protect AdMob Show Rate.
             launch {
                 consentManager.canRequestAds.first { it }
                 withContext(Dispatchers.Main.immediate) {
                     interstitialAdManager.preload()
-                    nativeAdManager.preloadBuffer()
                 }
             }
             launch { repository.pruneExpiredCache() }
@@ -170,6 +239,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             feedJob?.join()
             _isSplashPreloadComplete.value = true
             _rawState.update { it.copy(isSplashPreloadComplete = true) }
+
+            // Stage 3: Silently pre-warm SearchScreen category covers in the background so
+            // opening Search later is instantaneous (0ms wait for covers).
+            launch {
+                delay(500L)
+                warmSearchCategoryCoverPools()
+            }
         }
     }
 
@@ -197,17 +273,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onSearchInputChange(value: String) {
-        _rawState.update { it.copy(searchInput = value) }
-        val trimmed = value.trim()
-        val targetQuery = trimmed.ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
+        val isLive = _rawState.value.isLiveTab
+        val suggestions = computeSearchSuggestions(value, isLiveTab = isLive)
+        _rawState.update {
+            it.copy(
+                searchInput = value,
+                searchSuggestions = suggestions,
+            )
+        }
+        val cleaned = value.trim().removePrefix("#").trim()
+        val targetQuery = cleaned.ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
         searchDebounceJob?.cancel()
-        if (targetQuery != WallpaperRepository.HOME_TRENDING_KEY && trimmed.length < 2) {
+        if (!isLive && targetQuery != WallpaperRepository.HOME_TRENDING_KEY && cleaned.length < 2) {
             return
         }
         if (!_rawState.value.activeQuery.equals(targetQuery, ignoreCase = true)) {
+            val debounceMs = when {
+                isLive -> 120L
+                targetQuery == WallpaperRepository.HOME_TRENDING_KEY -> 250L
+                else -> 550L
+            }
             searchDebounceJob = viewModelScope.launch {
-                delay(if (targetQuery == WallpaperRepository.HOME_TRENDING_KEY) 250L else 550L)
-                _rawState.update { it.copy(activeQuery = targetQuery) }
+                delay(debounceMs)
+                _rawState.update {
+                    it.copy(
+                        activeQuery = targetQuery,
+                        scrollToTopSignal = it.scrollToTopSignal + 1,
+                    )
+                }
                 loadFeed(forceRefresh = false)
             }
         }
@@ -215,12 +308,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun submitSearch(queryOverride: String? = null) {
         searchDebounceJob?.cancel()
-        val targetQuery = (queryOverride ?: _rawState.value.searchInput).trim()
-            .ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
+        val raw = (queryOverride ?: _rawState.value.searchInput).trim()
+        val cleaned = raw.removePrefix("#").trim()
+        val targetQuery = cleaned.ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
         _rawState.update {
             it.copy(
                 activeQuery = targetQuery,
-                searchInput = if (queryOverride != null) targetQuery else it.searchInput,
+                searchInput = when {
+                    targetQuery == WallpaperRepository.HOME_TRENDING_KEY -> ""
+                    queryOverride != null -> raw
+                    else -> it.searchInput
+                },
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = it.scrollToTopSignal + 1,
             )
         }
         loadFeed(forceRefresh = false)
@@ -228,32 +328,95 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectTrendingTopic(topic: String) {
         searchDebounceJob?.cancel()
-        val isReset = topic.equals("anime", ignoreCase = true) ||
-                _rawState.value.activeQuery.equals(topic, ignoreCase = true)
+        val cleanedTopic = topic.trim().removePrefix("#").trim()
+        val currentActive = _rawState.value.activeQuery.trim().removePrefix("#").trim()
+        val isReset = cleanedTopic.isEmpty() ||
+                cleanedTopic.equals("all", ignoreCase = true) ||
+                cleanedTopic.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true) ||
+                currentActive.equals(cleanedTopic, ignoreCase = true)
         val normalized = if (isReset) {
             WallpaperRepository.HOME_TRENDING_KEY
         } else {
-            topic
+            cleanedTopic
         }
         _rawState.update {
             it.copy(
                 activeQuery = normalized,
-                searchInput = if (normalized == WallpaperRepository.HOME_TRENDING_KEY) "" else topic,
+                searchInput = if (isReset) "" else topic.trim(),
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = it.scrollToTopSignal + 1,
             )
         }
         loadFeed(forceRefresh = false)
     }
 
     fun selectTab(isLive: Boolean) {
-        if (_rawState.value.isLiveTab == isLive) return
+        if (_rawState.value.isLiveTab == isLive) {
+            // Re-tapping the active 4K Artworks / Live Wallpapers tab still returns the feed to the top.
+            _rawState.update { state ->
+                state.copy(scrollToTopSignal = state.scrollToTopSignal + 1)
+            }
+            return
+        }
         searchDebounceJob?.cancel()
-        _rawState.update { it.copy(isLiveTab = isLive) }
+        _rawState.update { state ->
+            state.copy(
+                isLiveTab = isLive,
+                searchSuggestions = if (state.searchInput.isNotBlank()) {
+                    computeSearchSuggestions(state.searchInput, isLiveTab = isLive)
+                } else {
+                    emptyList()
+                },
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
         loadFeed(forceRefresh = false)
+    }
+
+    private fun computeSearchSuggestions(
+        rawInput: String,
+        isLiveTab: Boolean,
+    ): List<LiveSearchSuggestion> {
+        val cleaned = rawInput.trim().removePrefix("#").trim()
+        if (cleaned.isEmpty()) return emptyList()
+        if (isLiveTab) {
+            return liveWallpaperRepository.getSearchSuggestions(rawInput, limit = 8)
+        }
+        val results = mutableListOf<LiveSearchSuggestion>()
+        CURATED_STATIC_TAGS
+            .filter { it.query.contains(cleaned, ignoreCase = true) }
+            .take(4)
+            .forEach { chip ->
+                results += LiveSearchSuggestion(
+                    label = chip.label,
+                    query = chip.label,
+                    type = SearchSuggestionType.TAG,
+                )
+            }
+        val startsWithMatches = AnimeCatalog.animeSearchKeywords
+            .filter { it.startsWith(cleaned, ignoreCase = true) }
+        val containsMatches = AnimeCatalog.animeSearchKeywords
+            .filter { !it.startsWith(cleaned, ignoreCase = true) && it.contains(cleaned, ignoreCase = true) }
+        (startsWithMatches + containsMatches)
+            .take((8 - results.size).coerceAtLeast(0))
+            .forEach { series ->
+                results += LiveSearchSuggestion(
+                    label = series,
+                    query = series,
+                    type = SearchSuggestionType.CATEGORY,
+                )
+            }
+        return results
     }
 
     fun applyFilter(newFilter: WallpaperFilter) {
         searchDebounceJob?.cancel()
-        _rawState.update { it.copy(filter = newFilter) }
+        _rawState.update {
+            it.copy(
+                filter = newFilter,
+                scrollToTopSignal = it.scrollToTopSignal + 1,
+            )
+        }
         viewModelScope.launch {
             settingsStore.setPreferredResolution(newFilter.resolution)
         }
@@ -262,7 +425,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshFeed() {
         searchDebounceJob?.cancel()
-        _rawState.update { it.copy(isRefreshing = true) }
+        _rawState.update {
+            it.copy(
+                isRefreshing = true,
+                scrollToTopSignal = it.scrollToTopSignal + 1,
+            )
+        }
         loadFeed(forceRefresh = true)
     }
 
@@ -335,15 +503,385 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         searchDebounceJob?.cancel()
         _rawState.update {
             it.copy(
+                isLiveTab = false,
                 activeQuery = category.query,
                 searchInput = category.title,
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = it.scrollToTopSignal + 1,
             )
         }
         loadFeed(forceRefresh = false)
     }
 
+    fun searchFromSearchScreen(
+        query: String,
+        isColorSearch: Boolean = false,
+        preferLive: Boolean? = null,
+    ) {
+        searchDebounceJob?.cancel()
+        val raw = query.trim()
+        val cleaned = raw.removePrefix("#").trim()
+        val targetQuery = cleaned.ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
+
+        val currentIsLive = _rawState.value.isLiveTab
+        val isExploreDomain = AnimeCatalog.exploreCategories.any {
+            it.title.equals(targetQuery, ignoreCase = true) || it.query.equals(targetQuery, ignoreCase = true)
+        }
+        val resolvedIsLive = when {
+            preferLive != null -> preferLive
+            (isColorSearch || isExploreDomain) && currentIsLive -> {
+                // Keep Live tab if R2 JSON has matching wallpapers for this color/domain; otherwise switch to 4K Artworks so user sees rich results immediately.
+                val liveMatches = liveWallpaperRepository.getCachedCatalogSnapshot(targetQuery)?.items.orEmpty()
+                liveMatches.isNotEmpty()
+            }
+            else -> currentIsLive
+        }
+
+        _rawState.update {
+            it.copy(
+                isLiveTab = resolvedIsLive,
+                activeQuery = targetQuery,
+                searchInput = if (targetQuery == WallpaperRepository.HOME_TRENDING_KEY) "" else raw,
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = it.scrollToTopSignal + 1,
+            )
+        }
+        loadFeed(forceRefresh = false)
+    }
+
+    fun getUnifiedSearchSuggestions(rawInput: String): List<LiveSearchSuggestion> {
+        val cleaned = rawInput.trim().removePrefix("#").trim()
+        if (cleaned.isEmpty()) return emptyList()
+
+        val merged = LinkedHashMap<String, LiveSearchSuggestion>()
+        liveWallpaperRepository.getSearchSuggestions(rawInput, limit = 6).forEach { suggestion ->
+            merged.putIfAbsent("${suggestion.type.name}:${suggestion.query.lowercase()}", suggestion)
+        }
+        computeSearchSuggestions(rawInput, isLiveTab = false).forEach { suggestion ->
+            if (merged.size < 10) {
+                merged.putIfAbsent("${suggestion.type.name}:${suggestion.query.lowercase()}", suggestion)
+            }
+        }
+        return merged.values.take(10)
+    }
+
     fun updateCategorySearch(query: String) {
         _categoryFilterText.value = query
+    }
+
+    /**
+     * Loads 4-thumbnail preview strips and real wallpaper totals only for the currently
+     * visible anime rows on CategoriesScreen (Anime 200+). Local Room/R2 caches hydrate
+     * instantaneously; uncached rows fetch sequentially with pacing to protect API quotas.
+     */
+    fun requestAnimeCategoryPreviews(visibleCategories: List<AnimeCategory>) {
+        if (visibleCategories.isEmpty()) return
+        val activeFilter = _rawState.value.filter
+        categoryPreviewJob?.cancel()
+        categoryPreviewJob = viewModelScope.launch {
+            // Phase 1: Instant local hydration from Room + R2 cache (0 network calls)
+            for (category in visibleCategories) {
+                val existing = _animeCategoryPreviews.value[category.id]
+                if (existing != null && existing.thumbnailUrls.size >= 4 && !existing.isLoading) continue
+                val cached = repository.getCachedAnimeCategoryPreview(category, activeFilter)
+                if (cached != null && cached.thumbnailUrls.isNotEmpty()) {
+                    _animeCategoryPreviews.update { map -> map + (category.id to cached) }
+                }
+            }
+
+            // Phase 2: Throttled network fetch for visible rows still needing 4 photos or total count
+            for (category in visibleCategories) {
+                val current = _animeCategoryPreviews.value[category.id]
+                if (current != null && current.thumbnailUrls.size >= 4 && current.totalCount > 4 && !current.isLoading) {
+                    continue
+                }
+                if (current == null || current.thumbnailUrls.isEmpty()) {
+                    _animeCategoryPreviews.update { map ->
+                        map + (
+                                category.id to AnimeSeriesPreview(
+                                    categoryId = category.id,
+                                    isLoading = true,
+                                )
+                                )
+                    }
+                }
+                val fetched = try {
+                    repository.fetchAnimeCategoryPreview(category, activeFilter)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    current?.copy(isLoading = false) ?: AnimeSeriesPreview(categoryId = category.id, isLoading = false)
+                }
+                _animeCategoryPreviews.update { map -> map + (category.id to fetched) }
+                if (fetched.thumbnailUrls.isNotEmpty()) {
+                    enqueueImageWarmup(fetched.thumbnailUrls, widthPx = 240, heightPx = 420)
+                }
+                delay(150L)
+            }
+        }
+    }
+
+    /**
+     * Opens an Anime 200+ series directly into DetailPreviewScreen at the exact tapped tile,
+     * pre-seeded with the already-loaded Page 1 wallpapers so the detail screen opens instantly
+     * and can seamlessly paginate through all remaining (+N) wallpapers on swipe.
+     */
+    fun openAnimeCategoryInDetail(category: AnimeCategory) {
+        collectionDetailJob?.cancel()
+        collectionLoadMoreJob?.cancel()
+        val activeFilter = _rawState.value.filter
+        val preview = _animeCategoryPreviews.value[category.id]
+        val initialItems = preview?.wallpapers.orEmpty()
+        val initialTotal = maxOf(preview?.totalCount ?: 0, initialItems.size)
+        val initialHasMore = initialItems.isNotEmpty() &&
+                (initialItems.size < initialTotal || initialItems.size >= 18)
+
+        _collectionDetailState.value = CollectionDetailState(
+            category = category,
+            items = initialItems,
+            totalCount = initialTotal,
+            currentPage = 1,
+            hasMore = initialHasMore,
+            isLoadingInitial = initialItems.isEmpty(),
+            isLoadingMore = false,
+        )
+
+        if (initialItems.isEmpty()) {
+            collectionDetailJob = viewModelScope.launch {
+                val fetched = try {
+                    repository.fetchAnimeCategoryPreview(category, activeFilter)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    AnimeSeriesPreview(categoryId = category.id, isLoading = false)
+                }
+                _animeCategoryPreviews.update { map -> map + (category.id to fetched) }
+                val loadedItems = fetched.wallpapers
+                val resolvedTotal = maxOf(fetched.totalCount, loadedItems.size)
+                val hasMore = loadedItems.isNotEmpty() &&
+                        (loadedItems.size < resolvedTotal || loadedItems.size >= 18)
+                _collectionDetailState.update { state ->
+                    if (state.category?.id != category.id) return@update state
+                    state.copy(
+                        items = loadedItems,
+                        totalCount = resolvedTotal,
+                        currentPage = 1,
+                        hasMore = hasMore,
+                        isLoadingInitial = false,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads the next page (page 2, 3, ...) of the active Anime 200+ collection when the user
+     * swipes near the end inside DetailPreviewScreen.
+     */
+    fun loadMoreCollectionDetail() {
+        val current = _collectionDetailState.value
+        val category = current.category ?: return
+        if (current.isLoadingInitial || current.isLoadingMore || !current.hasMore) return
+
+        val nextPage = current.currentPage + 1
+        val activeFilter = _rawState.value.filter
+        _collectionDetailState.update { it.copy(isLoadingMore = true) }
+
+        collectionLoadMoreJob?.cancel()
+        collectionLoadMoreJob = viewModelScope.launch {
+            try {
+                val result = repository.fetchAnimeCategoryDetailPage(
+                    category = category,
+                    filter = activeFilter,
+                    page = nextPage,
+                )
+                _collectionDetailState.update { state ->
+                    if (state.category?.id != category.id) {
+                        return@update state.copy(isLoadingMore = false)
+                    }
+                    val merged = (state.items + result.wallpapers).distinctBy { it.id }
+                    val addedNew = merged.size > state.items.size
+                    val updatedTotal = maxOf(state.totalCount, result.totalCount, merged.size)
+                    state.copy(
+                        items = merged,
+                        totalCount = updatedTotal,
+                        currentPage = if (addedNew) nextPage else state.currentPage,
+                        hasMore = result.hasMore && addedNew,
+                        isLoadingMore = false,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _collectionDetailState.update { it.copy(isLoadingMore = false) }
+            } finally {
+                if (_collectionDetailState.value.isLoadingMore) {
+                    _collectionDetailState.update { it.copy(isLoadingMore = false) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Invoked every time the user enters (or returns to) SearchScreen from another screen.
+     * Rotates all 12 Trending Category cards off the Main thread (0ms UI jank) and ensures
+     * any uncached category pools are hydrated immediately from Room + bounded parallel fetches.
+     */
+    fun onSearchScreenEntered() {
+        searchReshuffleJob?.cancel()
+        searchReshuffleJob = viewModelScope.launch(Dispatchers.Default) {
+            reshuffleSearchCategoryCovers()
+        }
+        warmSearchCategoryCoverPools()
+    }
+
+    private fun buildCandidatesForCategory(title: String): Pair<List<CategoryCoverCandidate>, List<CategoryCoverCandidate>> {
+        val staticUrls = buildList {
+            categoryStaticPools[title].orEmpty().forEach { add(it) }
+            if (title.equals("Anime", ignoreCase = true)) {
+                _rawState.value.trendingBanners.forEach { banner ->
+                    if (banner.thumbnailUrl.isNotBlank()) add(banner.thumbnailUrl)
+                }
+            }
+        }.distinct()
+
+        val liveUrls = liveWallpaperRepository.getMatchingLiveCoverUrls(query = title, limit = 10)
+
+        val staticCandidates = staticUrls.map { url ->
+            CategoryCoverCandidate(imageUrl = url, isLive = false, liveKeyword = null)
+        }
+        val liveCandidates = liveUrls.map { url ->
+            CategoryCoverCandidate(imageUrl = url, isLive = true, liveKeyword = title)
+        }
+        return staticCandidates to liveCandidates
+    }
+
+    private fun reshuffleSearchCategoryCovers() {
+        val previousMap = _searchCategoryCovers.value
+        val nextMap = LinkedHashMap<String, CategoryCoverCandidate>()
+        for (topic in AnimeCatalog.exploreCategories) {
+            val (staticCandidates, liveCandidates) = buildCandidatesForCategory(topic.title)
+            val chosen = pickNextRandomCover(
+                staticCandidates = staticCandidates,
+                liveCandidates = liveCandidates,
+                previousUrl = previousMap[topic.title]?.imageUrl,
+            )
+            if (chosen != null) {
+                nextMap[topic.title] = chosen
+            }
+        }
+        if (nextMap.isNotEmpty() || previousMap.isEmpty()) {
+            _searchCategoryCovers.value = nextMap
+        }
+    }
+
+    private fun fillMissingSearchCategoryCovers() {
+        val currentMap = _searchCategoryCovers.value
+        var changed = false
+        val updated = LinkedHashMap(currentMap)
+        for (topic in AnimeCatalog.exploreCategories) {
+            if (updated.containsKey(topic.title)) continue
+            val (staticCandidates, liveCandidates) = buildCandidatesForCategory(topic.title)
+            val chosen = pickNextRandomCover(
+                staticCandidates = staticCandidates,
+                liveCandidates = liveCandidates,
+                previousUrl = null,
+            )
+            if (chosen != null) {
+                updated[topic.title] = chosen
+                changed = true
+            }
+        }
+        if (changed) {
+            _searchCategoryCovers.value = updated
+        }
+    }
+
+    private fun warmSearchCategoryCoverPools() {
+        if (searchCoverWarmupJob?.isActive == true) return
+        val activeFilter = _rawState.value.filter
+        searchCoverWarmupJob = viewModelScope.launch(Dispatchers.IO) {
+            // Phase 1: Instant parallel Room cache hydration for all 12 categories (0 network, 0 delay).
+            val missingFromMemory = AnimeCatalog.exploreCategories.filter { topic ->
+                val existingPool = categoryStaticPools[topic.title]
+                existingPool == null || existingPool.size < 4
+            }
+            if (missingFromMemory.isEmpty()) return@launch
+
+            val cachedResults = coroutineScope {
+                missingFromMemory.map { topic ->
+                    async {
+                        val urls = runCatching {
+                            repository.getCachedExploreCategoryStaticCovers(
+                                topic = topic,
+                                filter = activeFilter,
+                                maxCount = 10,
+                            )
+                        }.getOrDefault(emptyList())
+                        topic to urls
+                    }
+                }.awaitAll()
+            }
+
+            val newlyHydrated = mutableListOf<String>()
+            val stillMissing = mutableListOf<com.example.domain.model.TrendingAnimeTopic>()
+            for ((topic, urls) in cachedResults) {
+                if (urls.isNotEmpty()) {
+                    categoryStaticPools[topic.title] = urls
+                    newlyHydrated += urls.first()
+                }
+                if (urls.size < 4) {
+                    stillMissing += topic
+                }
+            }
+            if (newlyHydrated.isNotEmpty()) {
+                fillMissingSearchCategoryCovers()
+                enqueueImageWarmup(newlyHydrated, widthPx = 300, heightPx = 400)
+            }
+
+            if (stillMissing.isEmpty()) return@launch
+
+            // Phase 2: Bounded parallel network warmup (3 concurrent fetches, zero artificial sleep)
+            // so cold-start category covers populate in ~1s instead of 5-8s sequential stalls.
+            val semaphore = Semaphore(permits = 3)
+            coroutineScope {
+                stillMissing.map { topic ->
+                    async {
+                        semaphore.withPermit {
+                            val urls = try {
+                                repository.getExploreCategoryStaticCovers(
+                                    topic = topic,
+                                    filter = activeFilter,
+                                    maxCount = 10,
+                                )
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+
+                            if (urls.isNotEmpty()) {
+                                categoryStaticPools[topic.title] = urls
+                                enqueueImageWarmup(urls.take(2), widthPx = 300, heightPx = 400)
+                                _searchCategoryCovers.update { currentMap ->
+                                    if (currentMap.containsKey(topic.title)) {
+                                        currentMap
+                                    } else {
+                                        val (staticCandidates, liveCandidates) = buildCandidatesForCategory(topic.title)
+                                        val chosen = pickNextRandomCover(
+                                            staticCandidates = staticCandidates,
+                                            liveCandidates = liveCandidates,
+                                            previousUrl = null,
+                                        ) ?: return@update currentMap
+                                        currentMap + (topic.title to chosen)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
     }
 
     private fun loadFeed(forceRefresh: Boolean) {
@@ -384,7 +922,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         bannerMessage = null,
                         isRefreshing = needsNetworkRefresh,
                         currentPage = 1,
-                        hasMore = true,
+                        hasMore = if (current.isLiveTab) {
+                            localSnapshot.size >= com.example.data.repository.LiveWallpaperRepository.DEFAULT_PAGE_SIZE
+                        } else {
+                            true
+                        },
                         isLoadingMore = false,
                     )
                 }
@@ -400,20 +942,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         feedStatus = FeedStatus.Loading,
                         bannerMessage = null,
                         currentPage = 1,
-                        hasMore = true,
+                        hasMore = !current.isLiveTab,
                         isLoadingMore = false,
                     )
                 }
             }
 
-            val result = repository.refreshWallpapersIfNeeded(
-                query = current.activeQuery,
-                isLive = current.isLiveTab,
-                filter = current.filter,
-                page = 1,
-                forceRefresh = forceRefresh,
-            )
+            val result = try {
+                repository.refreshWallpapersIfNeeded(
+                    query = current.activeQuery,
+                    isLive = current.isLiveTab,
+                    filter = current.filter,
+                    page = 1,
+                    forceRefresh = forceRefresh,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                runCatching {
+                    Log.e(
+                        "LIVE_DEBUG",
+                        "loadFeed unexpected error (isLive=${current.isLiveTab}, query=${current.activeQuery}): ${e.message}",
+                        e,
+                    )
+                }
+                com.example.data.repository.WallpaperFetchResult(
+                    wallpapers = emptyList(),
+                    isFromCache = false,
+                    hasMore = false,
+                    warningMessage = "Unexpected error loading feed (${e.javaClass.simpleName}: ${e.localizedMessage ?: "unknown"}).",
+                )
+            }
             val resolvedItems = result.wallpapers.ifEmpty { localSnapshot }
+            if (current.isLiveTab) {
+                runCatching {
+                    Log.d(
+                        "LIVE_DEBUG",
+                        "Live tab loaded ${resolvedItems.size} items (query=${current.activeQuery}, warning=${result.warningMessage})",
+                    )
+                }
+            }
             _rawState.update { state ->
                 val status = if (resolvedItems.isNotEmpty()) {
                     FeedStatus.Success(resolvedItems)
@@ -424,7 +992,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         current.activeQuery
                     }
                     val emptyReason = if (current.isLiveTab) {
-                        "No live MP4 loops found for \"$label\". Try \"Cyberpunk Edgerunners\" or \"Solo Leveling\"."
+                        val suggested = buildList {
+                            state.liveCatalogFacets.categories.take(2).forEach { add("\"${it.label}\"") }
+                            state.liveCatalogFacets.tags.take(2).forEach { add("\"${it.label}\"") }
+                        }.take(3).ifEmpty { listOf("\"Frieren\"", "\"Bleach\"", "\"#magic\"") }
+                        "No live wallpapers matched \"$label\" in title, #tags, or category. Try ${suggested.joinToString(", ")}."
                     } else {
                         "No ${current.filter.resolution.label} wallpapers found for \"$label\"."
                     }
@@ -529,53 +1101,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val videoUrl = wallpaper.videoUrl ?: return
         if (_rawState.value.isProcessingAction) return
 
+        val alreadyDownloaded = liveWallpaperRepository.isDownloaded(wallpaper.id)
         _rawState.update {
             it.copy(
                 isProcessingAction = true,
-                liveDownloadProgress = null,
-                processingLabel = "Preparing Live Wallpaper…",
+                liveDownloadProgress = if (alreadyDownloaded) 100 else 0,
+                processingLabel = if (alreadyDownloaded) {
+                    "Ready from offline storage (100%)…"
+                } else {
+                    "Preparing Live Wallpaper…"
+                },
             )
         }
 
         viewModelScope.launch {
-            mediaDownloadManager.downloadLiveWallpaper(videoUrl).collect { downloadState ->
-                when (downloadState) {
-                    LiveDownloadState.Idle -> Unit
-                    is LiveDownloadState.Downloading -> {
-                        _rawState.update {
-                            it.copy(
-                                isProcessingAction = true,
-                                liveDownloadProgress = downloadState.progress,
-                                processingLabel = "Downloading Live Video... ${downloadState.progress}%",
-                            )
-                        }
+            val downloadResult = liveWallpaperRepository.downloadFullVideo(
+                wallpaperId = wallpaper.id,
+                fullUrl = videoUrl,
+                onProgress = { percent ->
+                    // MutableStateFlow.update is thread-safe when invoked from Dispatchers.IO.
+                    _rawState.update { state ->
+                        state.copy(
+                            isProcessingAction = true,
+                            liveDownloadProgress = percent.coerceIn(0, 100),
+                            processingLabel = "Downloading Live Video... ${percent.coerceIn(0, 100)}%",
+                        )
                     }
+                },
+            )
 
-                    is LiveDownloadState.Success -> {
-                        settingsStore.setActiveLiveWallpaper(downloadState.file.absolutePath, wallpaper.title)
-                        _rawState.update {
-                            it.copy(
-                                isProcessingAction = false,
-                                liveDownloadProgress = null,
-                                processingLabel = null,
-                                appliedSuccessTarget = null,
-                            )
-                        }
-                        _events.emit(UiEvent.LaunchLiveWallpaperChooser(target))
+            downloadResult.fold(
+                onSuccess = { downloadedFile ->
+                    MediaDownloadManager.setActiveLiveVideoFile(
+                        context = getApplication(),
+                        file = downloadedFile,
+                    )
+                    settingsStore.setActiveLiveWallpaper(downloadedFile.absolutePath, wallpaper.title)
+                    _rawState.update {
+                        it.copy(
+                            isProcessingAction = false,
+                            liveDownloadProgress = null,
+                            processingLabel = null,
+                            appliedSuccessTarget = null,
+                        )
                     }
+                    _events.emit(UiEvent.LaunchLiveWallpaperChooser(target))
+                },
+                onFailure = { err ->
+                    _rawState.update {
+                        it.copy(
+                            isProcessingAction = false,
+                            liveDownloadProgress = null,
+                            processingLabel = null,
+                        )
+                    }
+                    _events.emit(
+                        UiEvent.ShowMessage(err.localizedMessage ?: "Failed to download live wallpaper."),
+                    )
+                },
+            )
+        }
+    }
 
-                    is LiveDownloadState.Error -> {
-                        _rawState.update {
-                            it.copy(
-                                isProcessingAction = false,
-                                liveDownloadProgress = null,
-                                processingLabel = null,
-                            )
-                        }
-                        _events.emit(UiEvent.ShowMessage(downloadState.message))
-                    }
-                }
+    fun clearDownloadedLiveVideos() {
+        viewModelScope.launch {
+            val activePath = settings.value.activeLiveWallpaperPath
+            val deletedCount = withContext(Dispatchers.IO) {
+                liveWallpaperRepository.clearDownloadedVideos(keepFilePath = activePath)
             }
+            val message = if (deletedCount > 0) {
+                "Cleared $deletedCount downloaded live video${if (deletedCount == 1) "" else "s"} (active wallpaper kept)."
+            } else {
+                "No unused downloaded live videos to clear."
+            }
+            _events.emit(UiEvent.ShowMessage(message))
         }
     }
 
@@ -631,6 +1230,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getCurrentFeedList(feedSource: String): List<AppWallpaper> {
         return when (feedSource) {
+            com.example.ui.navigation.DetailRoute.FEED_COLLECTION -> collectionDetailState.value.items
             com.example.ui.navigation.DetailRoute.FEED_FAVORITES -> favorites.value
             com.example.ui.navigation.DetailRoute.FEED_FAVORITES_STATIC ->
                 favorites.value.filter { !it.isLive }
@@ -645,6 +1245,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         const val REQUEST_SUPPORT_EMAIL = "damtiendat24072000@gmail.com"
+        private const val LIVE_COVER_PROBABILITY = 0.45f
+
+        /**
+         * Selects the next random cover candidate for a SearchScreen Trending Category card,
+         * mixing static artwork covers and live wallpaper covers while avoiding [previousUrl]
+         * whenever alternatives exist so returning to SearchScreen visibly refreshes covers.
+         */
+        internal fun pickNextRandomCover(
+            staticCandidates: List<CategoryCoverCandidate>,
+            liveCandidates: List<CategoryCoverCandidate>,
+            previousUrl: String?,
+            random: Random = Random.Default,
+        ): CategoryCoverCandidate? {
+            if (staticCandidates.isEmpty() && liveCandidates.isEmpty()) return null
+
+            val staticAlternatives = staticCandidates.filter { it.imageUrl != previousUrl }
+            val liveAlternatives = liveCandidates.filter { it.imageUrl != previousUrl }
+
+            return when {
+                staticCandidates.isNotEmpty() && liveCandidates.isNotEmpty() -> {
+                    val preferLive = random.nextFloat() < LIVE_COVER_PROBABILITY
+                    val primaryPool = if (preferLive) liveAlternatives else staticAlternatives
+                    val secondaryPool = if (preferLive) staticAlternatives else liveAlternatives
+                    when {
+                        primaryPool.isNotEmpty() -> primaryPool[random.nextInt(primaryPool.size)]
+                        secondaryPool.isNotEmpty() -> secondaryPool[random.nextInt(secondaryPool.size)]
+                        else -> (liveCandidates + staticCandidates).first()
+                    }
+                }
+                liveCandidates.isNotEmpty() -> {
+                    val pool = liveAlternatives.ifEmpty { liveCandidates }
+                    pool[random.nextInt(pool.size)]
+                }
+                else -> {
+                    val pool = staticAlternatives.ifEmpty { staticCandidates }
+                    pool[random.nextInt(pool.size)]
+                }
+            }
+        }
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {

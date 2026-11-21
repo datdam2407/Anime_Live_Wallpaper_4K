@@ -1,6 +1,5 @@
 package com.example.di
 
-
 import android.content.Context
 import android.os.SystemClock
 import coil.ImageLoader
@@ -11,33 +10,50 @@ import com.example.ads.GoogleMobileAdsConsentManager
 import com.example.ads.InterstitialAdManager
 import com.example.ads.NativeAdManager
 import com.example.data.local.KuroWallDatabase
-import com.example.data.local.LiveWallpaperDataSource
+import com.example.data.local.LiveWallpaperDownloader
 import com.example.data.local.SettingsDataStore
+import com.example.data.remote.LiveCatalogApi
+import com.example.data.remote.NetworkClient
 import com.example.data.remote.NetworkModule
 import com.example.data.remote.WallhavenRateLimiter
+import com.example.data.remote.WallhavenService
+import com.example.data.repository.LiveWallpaperRepository
 import com.example.data.repository.WallpaperRepository
 import com.example.util.BitmapCropper
 import com.example.util.MediaDownloadManager
 
-
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
-
 
     val database: KuroWallDatabase by lazy {
         KuroWallDatabase.build(appContext)
     }
 
-
     val settingsDataStore: SettingsDataStore by lazy {
         SettingsDataStore(appContext)
     }
 
-
-    val liveWallpaperDataSource: LiveWallpaperDataSource by lazy {
-        LiveWallpaperDataSource(appContext)
+    val liveCatalogApi: LiveCatalogApi by lazy {
+        NetworkClient.createLiveCatalogApi(appContext)
     }
 
+    val liveWallpaperDownloader: LiveWallpaperDownloader by lazy {
+        LiveWallpaperDownloader(
+            context = appContext,
+            downloadClient = NetworkModule.mediaOkHttpClient,
+        )
+    }
+
+    val liveWallpaperRepository: LiveWallpaperRepository by lazy {
+        LiveWallpaperRepository(
+            api = liveCatalogApi,
+            downloader = liveWallpaperDownloader,
+        )
+    }
+
+    val wallhavenService: WallhavenService by lazy {
+        NetworkModule.createWallhavenService(appContext)
+    }
 
     val imageLoader: ImageLoader by lazy {
         ImageLoader.Builder(appContext)
@@ -64,22 +80,19 @@ class AppContainer(context: Context) {
             .build()
     }
 
-
     val wallhavenRateLimiter: WallhavenRateLimiter by lazy {
         WallhavenRateLimiter(clock = { SystemClock.elapsedRealtime() })
     }
 
-
     val wallpaperRepository: WallpaperRepository by lazy {
         WallpaperRepository(
-            wallhavenApi = NetworkModule.wallhavenService,
+            wallhavenApi = wallhavenService,
             redditApi = NetworkModule.redditService,
             wallpaperDao = database.wallpaperDao(),
-            liveWallpaperDataSource = liveWallpaperDataSource,
+            liveWallpaperRepository = liveWallpaperRepository,
             wallhavenRateLimiter = wallhavenRateLimiter,
         )
     }
-
 
     val bitmapCropper: BitmapCropper by lazy {
         BitmapCropper(
@@ -88,7 +101,6 @@ class AppContainer(context: Context) {
         )
     }
 
-
     val mediaDownloadManager: MediaDownloadManager by lazy {
         MediaDownloadManager(
             context = appContext,
@@ -96,16 +108,13 @@ class AppContainer(context: Context) {
         )
     }
 
-
     val consentManager: GoogleMobileAdsConsentManager by lazy {
         GoogleMobileAdsConsentManager(appContext)
     }
 
-
     val interstitialAdManager: InterstitialAdManager by lazy {
         InterstitialAdManager(appContext = appContext)
     }
-
 
     val nativeAdManager: NativeAdManager by lazy {
         NativeAdManager(appContext = appContext)
