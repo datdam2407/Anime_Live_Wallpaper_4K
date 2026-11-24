@@ -9,6 +9,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -145,7 +146,7 @@ fun SplashScreen(
             .scale(Scale.FILL)
             .memoryCachePolicy(CachePolicy.ENABLED)
             .diskCachePolicy(CachePolicy.ENABLED)
-            .allowHardware(true)
+            .allowHardware(false)
             .build()
     }
 
@@ -157,7 +158,7 @@ fun SplashScreen(
             .scale(Scale.FILL)
             .memoryCachePolicy(CachePolicy.ENABLED)
             .diskCachePolicy(CachePolicy.ENABLED)
-            .allowHardware(true)
+            .allowHardware(false)
             .crossfade(220)
             .build()
     }
@@ -247,6 +248,7 @@ fun SplashScreen(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
+                .displayCutoutPadding()
                 .padding(top = 56.dp, start = 28.dp, end = 28.dp)
                 .alpha(contentAlpha.value * hudAlpha.value),
             horizontalAlignment = Alignment.CenterHorizontally,

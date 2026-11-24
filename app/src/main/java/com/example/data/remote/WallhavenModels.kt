@@ -24,6 +24,7 @@ data class WallhavenItem(
     val path: String,
     @Json(name = "dimension_x") val dimensionX: Int = 1080,
     @Json(name = "dimension_y") val dimensionY: Int = 1920,
+    @Json(name = "file_size") val fileSize: Long = 0L,
     val category: String? = null,
     val purity: String? = null,
     val ratio: String? = null,

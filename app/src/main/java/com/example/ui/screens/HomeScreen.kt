@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
@@ -55,6 +57,9 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -100,6 +105,7 @@ import com.example.ads.WallpaperGridEntry
 import com.example.ads.buildFeedWithNativeAds
 import com.example.domain.model.AnimeCatalog
 import com.example.domain.model.AppWallpaper
+import com.example.domain.model.LiveSearchSuggestion
 import com.example.domain.model.WallpaperFilter
 import com.example.ui.components.FilterBottomSheet
 import com.example.ui.components.LiveCatalogFilterSection
@@ -131,14 +137,21 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     uiState: HomeUiState,
     favoriteIdsState: State<Set<String>>,
     onSearchInputChange: (String) -> Unit,
     onSubmitSearch: () -> Unit,
-    onSelectSuggestion: (String) -> Unit,
+    onSelectSuggestion: (LiveSearchSuggestion) -> Unit,
     onSelectTrendingTopic: (String) -> Unit,
+    onToggleStaticCategory: (String) -> Unit = {},
+    onToggleStaticTag: (String) -> Unit = {},
+    onClearStaticFilters: () -> Unit = {},
+    onToggleLiveCategory: (String) -> Unit = {},
+    onToggleLiveTag: (String) -> Unit = {},
+    onClearLiveFilters: () -> Unit = {},
     onSelectTab: (Boolean) -> Unit,
     onApplyFilter: (WallpaperFilter) -> Unit,
     onRefresh: () -> Unit,
@@ -187,12 +200,12 @@ fun HomeScreen(
                 onOpenFilter = { showFilterSheet = true },
             )
 
-            // Instant Search Autocomplete Suggestions (Category / #Tag / Title)
+            // Instant Search Autocomplete Suggestions (Category / Series / #Tag / Title)
             SearchSuggestionStrip(
                 suggestions = uiState.searchSuggestions,
                 onSelectSuggestion = { suggestion ->
                     focusManager.clearFocus()
-                    onSelectSuggestion(suggestion.label)
+                    onSelectSuggestion(suggestion)
                 },
             )
 
@@ -251,6 +264,8 @@ fun HomeScreen(
             var lastLoadMoreTriggeredAtCount by remember(
                 uiState.activeQuery,
                 uiState.isLiveTab,
+                uiState.liveFilter,
+                uiState.staticFilter,
                 uiState.filter,
             ) {
                 mutableIntStateOf(-1)
@@ -262,7 +277,14 @@ fun HomeScreen(
                 }
             }
 
-            LaunchedEffect(gridState, uiState.activeQuery, uiState.isLiveTab, uiState.filter) {
+            LaunchedEffect(
+                gridState,
+                uiState.activeQuery,
+                uiState.isLiveTab,
+                uiState.liveFilter,
+                uiState.staticFilter,
+                uiState.filter,
+            ) {
                 snapshotFlow {
                     val layoutInfo = gridState.layoutInfo
                     val totalItems = layoutInfo.totalItemsCount
@@ -289,11 +311,26 @@ fun HomeScreen(
                 derivedStateOf { gridState.firstVisibleItemIndex > 15 }
             }
 
-            // Body: Auto-scrolling Trending Carousel + Trending Chips + Staggered Grid
-            Box(
+            val pullToRefreshState = rememberPullToRefreshState()
+
+            // Body: Pull-to-Refresh + Auto-scrolling Trending Carousel + Trending Chips + Staggered Grid
+            PullToRefreshBox(
+                isRefreshing = uiState.isRefreshing,
+                onRefresh = onRefresh,
+                state = pullToRefreshState,
+                indicator = {
+                    PullToRefreshDefaults.Indicator(
+                        state = pullToRefreshState,
+                        isRefreshing = uiState.isRefreshing,
+                        containerColor = ObsidianSurfaceElevated,
+                        color = if (uiState.isLiveTab) PremiumGold else CrimsonBlade,
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
+                },
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .testTag("home_pull_to_refresh"),
             ) {
                 LazyVerticalStaggeredGrid(
                     state = gridState,
@@ -330,30 +367,40 @@ fun HomeScreen(
                         val currentResultCount = (uiState.feedStatus as? FeedStatus.Success)?.items?.size
                         if (uiState.isLiveTab) {
                             LiveCatalogFilterSection(
-                                activeQuery = uiState.activeQuery,
+                                filterState = uiState.liveFilter,
                                 facets = uiState.liveCatalogFacets,
-                                resultCount = currentResultCount,
-                                onSelectTopic = { topic ->
+                                resultCount = uiState.liveTotalCount ?: currentResultCount,
+                                onToggleCategory = { category ->
                                     focusManager.clearFocus()
-                                    onSelectTrendingTopic(topic)
+                                    onToggleLiveCategory(category)
+                                },
+                                onToggleTag = { tagQuery ->
+                                    focusManager.clearFocus()
+                                    onToggleLiveTag(tagQuery)
                                 },
                                 onClearFilter = {
                                     focusManager.clearFocus()
-                                    onSelectTrendingTopic("All")
+                                    onClearLiveFilters()
                                 },
                                 onRefresh = onRefresh,
                             )
                         } else {
                             StaticCatalogFilterSection(
-                                activeQuery = uiState.activeQuery,
-                                resultCount = currentResultCount,
-                                onSelectTopic = { topic ->
+                                filterState = uiState.staticFilter,
+                                hiddenEmptyCategories = uiState.hiddenEmptyStaticCategories,
+                                verifiedTags = uiState.verifiedStaticTags,
+                                tagRotationVersion = uiState.staticTagRotationVersion,
+                                onToggleCategory = { category ->
                                     focusManager.clearFocus()
-                                    onSelectTrendingTopic(topic)
+                                    onToggleStaticCategory(category)
+                                },
+                                onToggleTag = { tagQuery ->
+                                    focusManager.clearFocus()
+                                    onToggleStaticTag(tagQuery)
                                 },
                                 onClearFilter = {
                                     focusManager.clearFocus()
-                                    onSelectTrendingTopic("All")
+                                    onClearStaticFilters()
                                 },
                                 onRefresh = onRefresh,
                             )
@@ -368,12 +415,12 @@ fun HomeScreen(
 
                     when (val status = uiState.feedStatus) {
                         FeedStatus.Loading -> {
-                            items(8) { index ->
-                                val ratio = if (index % 3 == 0) 0.56f else if (index % 2 == 0) 0.68f else 0.76f
+                            val shimmerRatio = if (uiState.isLiveTab) 0.58f else 0.66f
+                            items(8) {
                                 ShimmerBox(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height((220 / ratio).toInt().coerceIn(210, 320).dp)
+                                        .aspectRatio(shimmerRatio)
                                         .clip(RoundedCornerShape(18.dp)),
                                 )
                             }
@@ -385,7 +432,9 @@ fun HomeScreen(
                                     message = status.message,
                                     isLive = uiState.isLiveTab,
                                     onRetry = onRefresh,
-                                    onBrowseAll = { onSelectTrendingTopic("All") },
+                                    onBrowseAll = {
+                                        if (uiState.isLiveTab) onClearLiveFilters() else onClearStaticFilters()
+                                    },
                                 )
                             }
                         }
@@ -418,20 +467,16 @@ fun HomeScreen(
                                     is WallpaperGridEntry.WallpaperItem -> {
                                         val index = entry.originalIndex
                                         val wallpaper = entry.wallpaper
-                                        val staggeredRatio = remember(wallpaper.id, index) {
-                                            when (index % 4) {
-                                                0 -> wallpaper.aspectRatio.coerceIn(0.55f, 0.64f)
-                                                1 -> wallpaper.aspectRatio.coerceIn(0.68f, 0.78f)
-                                                2 -> wallpaper.aspectRatio.coerceIn(0.58f, 0.70f)
-                                                else -> wallpaper.aspectRatio.coerceIn(0.62f, 0.74f)
-                                            }
-                                        }
+                                        // Uniform card dimensions across each feed for clean visual alignment:
+                                        // Live Wallpapers: uniform 0.58f (9:15.5 phone portrait);
+                                        // 4K Artworks: uniform 0.66f (2:3 showcase frame).
+                                        val uniformCardRatio = if (wallpaper.isLive) 0.58f else 0.66f
                                         val isFavorite by remember(wallpaper.id, favoriteIdsState) {
                                             derivedStateOf { wallpaper.id in favoriteIdsState.value }
                                         }
                                         WallpaperStaggeredCard(
                                             wallpaper = wallpaper,
-                                            staggeredRatio = staggeredRatio,
+                                            staggeredRatio = uniformCardRatio,
                                             isFavorite = isFavorite,
                                             onClick = { onOpenDetail(index) },
                                             onToggleFavorite = { onToggleFavorite(wallpaper) },
@@ -795,7 +840,7 @@ private fun TrendingCarouselBanner(
                             .scale(Scale.FILL)
                             .memoryCachePolicy(CachePolicy.ENABLED)
                             .diskCachePolicy(CachePolicy.ENABLED)
-                            .allowHardware(true)
+                            .allowHardware(false)
                             .crossfade(160)
                             .build()
                     }

@@ -19,13 +19,19 @@ import com.example.domain.model.AnimeCategory
 import com.example.domain.model.AnimeSeriesPreview
 import com.example.domain.model.AppWallpaper
 import com.example.domain.model.CategoryCoverCandidate
+import com.example.domain.model.CrossTabSearchSync
+import com.example.domain.model.FacetType
 import com.example.domain.model.LiveCatalogFacets
+import com.example.domain.model.LiveFilterState
 import com.example.domain.model.LiveSearchSuggestion
+import com.example.domain.model.LiveTagChip
 import com.example.domain.model.ResolutionTier
 import com.example.domain.model.SearchSuggestionType
+import com.example.domain.model.StaticFilterState
 import com.example.domain.model.WallpaperFilter
 import com.example.domain.model.WallpaperTarget
 import com.example.ui.components.CURATED_STATIC_TAGS
+import com.example.ui.components.getStaticTagCandidatePool
 import com.example.ui.screens.SPLASH_WALLPAPER_JPG_URL
 import com.example.ui.screens.SPLASH_WALLPAPER_THUMB_URL
 import com.example.data.remote.RateLimitDistractionPrompt
@@ -68,6 +74,12 @@ data class HomeUiState(
     val activeQuery: String = WallpaperRepository.HOME_TRENDING_KEY,
     val searchInput: String = "",
     val isLiveTab: Boolean = false,
+    val liveFilter: LiveFilterState = LiveFilterState(),
+    val staticFilter: StaticFilterState = StaticFilterState(),
+    val isActiveColorSearch: Boolean = false,
+    val hiddenEmptyStaticCategories: Set<String> = emptySet(),
+    val verifiedStaticTags: List<LiveTagChip> = emptyList(),
+    val liveTotalCount: Int? = null,
     val filter: WallpaperFilter = WallpaperFilter(),
     val feedStatus: FeedStatus = FeedStatus.Loading,
     val trendingBanners: List<AppWallpaper> = emptyList(),
@@ -82,8 +94,16 @@ data class HomeUiState(
     val appliedSuccessTarget: String? = null,
     val isSplashPreloadComplete: Boolean = false,
     val liveCatalogFacets: LiveCatalogFacets = LiveCatalogFacets(),
+    val staticTagRotationVersion: Int = 0,
     val searchSuggestions: List<LiveSearchSuggestion> = emptyList(),
     val scrollToTopSignal: Int = 0,
+)
+
+data class DetailActionState(
+    val isProcessingAction: Boolean = false,
+    val processingLabel: String? = null,
+    val liveDownloadProgress: Int? = null,
+    val appliedSuccessTarget: String? = null,
 )
 
 data class CollectionDetailState(
@@ -127,11 +147,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var loadMoreJob: Job? = null
     private var searchDebounceJob: Job? = null
     private var searchCoverWarmupJob: Job? = null
+    private var staticTagProbeJob: Job? = null
     private var searchReshuffleJob: Job? = null
     private var categoryPreviewJob: Job? = null
+    private val categoryPreviewSemaphore = kotlinx.coroutines.sync.Semaphore(permits = 3)
+    private val inFlightCategoryPreviewIds = ConcurrentHashMap.newKeySet<String>()
+    private val verifiedStaticTagsByScope = ConcurrentHashMap<String, LinkedHashMap<String, LiveTagChip>>()
+    private val emptyStaticTagsByScope = ConcurrentHashMap<String, MutableSet<String>>()
     private var collectionDetailJob: Job? = null
     private var collectionLoadMoreJob: Job? = null
     private var startupPrefetchStarted = false
+    private var lastManualRefreshTriggeredAtMs = 0L
     private val categoryStaticPools = ConcurrentHashMap<String, List<String>>()
     private val _searchCategoryCovers = MutableStateFlow<Map<String, CategoryCoverCandidate>>(emptyMap())
     val searchCategoryCovers: StateFlow<Map<String, CategoryCoverCandidate>> = _searchCategoryCovers.asStateFlow()
@@ -160,10 +186,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LiveCatalogFacets())
 
+    val searchVerifiedStaticTags: StateFlow<List<LiveTagChip>> = _rawState
+        .map { it.verifiedStaticTags }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val searchTrendingBanners: StateFlow<List<AppWallpaper>> = _rawState
         .map { it.trendingBanners }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val detailActionState: StateFlow<DetailActionState> = _rawState
+        .map {
+            DetailActionState(
+                isProcessingAction = it.isProcessingAction,
+                processingLabel = it.processingLabel,
+                liveDownloadProgress = it.liveDownloadProgress,
+                appliedSuccessTarget = it.appliedSuccessTarget,
+            )
+        }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DetailActionState())
 
     val rateLimitDistraction: StateFlow<RateLimitDistractionPrompt?> =
         wallhavenRateLimiter.distractionPrompt
@@ -240,10 +283,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isSplashPreloadComplete.value = true
             _rawState.update { it.copy(isSplashPreloadComplete = true) }
 
-            // Stage 3: Silently pre-warm SearchScreen category covers in the background so
-            // opening Search later is instantaneous (0ms wait for covers).
+            // Stage 3: Verify Home 4K Artworks #Tags first (so only guaranteed non-empty hashtags appear),
+            // then probe explore categories & pre-warm SearchScreen category covers in the background.
             launch {
-                delay(500L)
+                val activeState = _rawState.value
+                warmVerifiedStaticTags(
+                    selectedCategory = activeState.staticFilter.selectedCategory,
+                    filter = activeState.filter,
+                    rotationSeed = activeState.staticTagRotationVersion,
+                    targetNewProbes = 6,
+                )
                 warmSearchCategoryCoverPools()
             }
         }
@@ -267,6 +316,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .precision(Precision.INEXACT)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
+                    .allowHardware(false)
                     .build()
                 loader.enqueue(request)
             }
@@ -281,24 +331,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 searchSuggestions = suggestions,
             )
         }
-        val cleaned = value.trim().removePrefix("#").trim()
+        val trimmedRaw = value.trim()
+        val isTagPrefix = trimmedRaw.startsWith("#")
+        val cleaned = trimmedRaw.removePrefix("#").trim()
         val targetQuery = cleaned.ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
         searchDebounceJob?.cancel()
-        if (!isLive && targetQuery != WallpaperRepository.HOME_TRENDING_KEY && cleaned.length < 2) {
-            return
-        }
-        if (!_rawState.value.activeQuery.equals(targetQuery, ignoreCase = true)) {
-            val debounceMs = when {
-                isLive -> 120L
-                targetQuery == WallpaperRepository.HOME_TRENDING_KEY -> 250L
-                else -> 550L
+
+        if (isLive) {
+            val currentLiveFilter = _rawState.value.liveFilter
+            if (cleaned.isEmpty() && currentLiveFilter.isHome && _rawState.value.staticFilter.isHome) {
+                return
+            }
+            if (cleaned.isNotEmpty() &&
+                currentLiveFilter.query.equals(cleaned, ignoreCase = true) &&
+                currentLiveFilter.selectedCategory == null &&
+                currentLiveFilter.selectedSeries == null &&
+                currentLiveFilter.selectedTags.isEmpty() &&
+                !currentLiveFilter.isColorSearch &&
+                _rawState.value.staticFilter.searchQuery.equals(cleaned, ignoreCase = true)
+            ) {
+                return
             }
             searchDebounceJob = viewModelScope.launch {
+                delay(120L)
+                val synced = CrossTabSearchSync.syncFromSearch(
+                    rawQuery = trimmedRaw,
+                    isColorSearch = false,
+                    facetType = if (isTagPrefix && cleaned.isNotEmpty()) FacetType.TAG else null,
+                    homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+                )
+                _rawState.update { state ->
+                    state.copy(
+                        liveFilter = synced.liveFilter,
+                        staticFilter = synced.staticFilter,
+                        isActiveColorSearch = false,
+                        activeQuery = synced.activeQueryForLive,
+                        scrollToTopSignal = state.scrollToTopSignal + 1,
+                    )
+                }
+                loadFeed(forceRefresh = false)
+            }
+            return
+        }
+
+        if (targetQuery != WallpaperRepository.HOME_TRENDING_KEY && cleaned.length < 2) {
+            return
+        }
+        if (!_rawState.value.activeQuery.equals(targetQuery, ignoreCase = true) ||
+            _rawState.value.staticFilter.isChipFilterActive ||
+            !_rawState.value.liveFilter.query.equals(cleaned, ignoreCase = true)
+        ) {
+            val debounceMs = if (targetQuery == WallpaperRepository.HOME_TRENDING_KEY) 250L else 550L
+            searchDebounceJob = viewModelScope.launch {
                 delay(debounceMs)
-                _rawState.update {
-                    it.copy(
-                        activeQuery = targetQuery,
-                        scrollToTopSignal = it.scrollToTopSignal + 1,
+                val synced = CrossTabSearchSync.syncFromSearch(
+                    rawQuery = trimmedRaw,
+                    isColorSearch = false,
+                    facetType = if (isTagPrefix && cleaned.isNotEmpty()) FacetType.TAG else null,
+                    homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+                )
+                _rawState.update { state ->
+                    state.copy(
+                        liveFilter = synced.liveFilter,
+                        staticFilter = synced.staticFilter,
+                        isActiveColorSearch = false,
+                        activeQuery = synced.activeQueryForStatic,
+                        scrollToTopSignal = state.scrollToTopSignal + 1,
                     )
                 }
                 loadFeed(forceRefresh = false)
@@ -309,40 +407,320 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun submitSearch(queryOverride: String? = null) {
         searchDebounceJob?.cancel()
         val raw = (queryOverride ?: _rawState.value.searchInput).trim()
+        val isTagPrefix = raw.startsWith("#")
         val cleaned = raw.removePrefix("#").trim()
-        val targetQuery = cleaned.ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
-        _rawState.update {
-            it.copy(
-                activeQuery = targetQuery,
+        val synced = CrossTabSearchSync.syncFromSearch(
+            rawQuery = raw,
+            isColorSearch = false,
+            facetType = if (isTagPrefix && cleaned.isNotEmpty()) FacetType.TAG else null,
+            homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+        )
+        _rawState.update { state ->
+            state.copy(
+                liveFilter = synced.liveFilter,
+                staticFilter = synced.staticFilter,
+                isActiveColorSearch = false,
+                activeQuery = if (state.isLiveTab) synced.activeQueryForLive else synced.activeQueryForStatic,
                 searchInput = when {
-                    targetQuery == WallpaperRepository.HOME_TRENDING_KEY -> ""
+                    cleaned.isEmpty() -> ""
                     queryOverride != null -> raw
-                    else -> it.searchInput
+                    else -> state.searchInput
                 },
                 searchSuggestions = emptyList(),
-                scrollToTopSignal = it.scrollToTopSignal + 1,
+                scrollToTopSignal = state.scrollToTopSignal + 1,
             )
         }
+        loadFeed(forceRefresh = false)
+    }
+
+    fun selectSearchSuggestion(suggestion: LiveSearchSuggestion) {
+        searchDebounceJob?.cancel()
+        val facetType = when (suggestion.type) {
+            SearchSuggestionType.CATEGORY -> FacetType.CATEGORY
+            SearchSuggestionType.SERIES -> FacetType.SERIES
+            SearchSuggestionType.TAG -> FacetType.TAG
+            SearchSuggestionType.TITLE -> null
+        }
+        val matchedExploreCategory = AnimeCatalog.exploreCategories.firstOrNull {
+            it.title.equals(suggestion.query, ignoreCase = true) ||
+                    it.query.equals(suggestion.query, ignoreCase = true)
+        }
+        val synced = CrossTabSearchSync.syncFromSearch(
+            rawQuery = suggestion.query,
+            isColorSearch = false,
+            facetType = facetType,
+            matchedExploreCategoryTitle = matchedExploreCategory?.title,
+            homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+        )
+        _rawState.update { state ->
+            state.copy(
+                liveFilter = synced.liveFilter,
+                staticFilter = synced.staticFilter,
+                isActiveColorSearch = false,
+                activeQuery = if (state.isLiveTab) synced.activeQueryForLive else synced.activeQueryForStatic,
+                searchInput = suggestion.label,
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        if (synced.staticFilter.selectedCategory != null) {
+            warmVerifiedStaticTags(
+                selectedCategory = synced.staticFilter.selectedCategory,
+                filter = _rawState.value.filter,
+                rotationSeed = 0,
+                targetNewProbes = 6,
+            )
+        }
+        loadFeed(forceRefresh = false)
+    }
+
+    fun toggleLiveCategory(category: String) {
+        searchDebounceJob?.cancel()
+        _rawState.update { state ->
+            val isSwitchingBetweenCategories = state.liveFilter.selectedCategory != null &&
+                    !state.liveFilter.selectedCategory.equals(category.trim(), ignoreCase = true)
+            val activeTag = state.liveFilter.selectedTags.firstOrNull()
+            val tagExistsInNewCategory = activeTag != null &&
+                    state.liveCatalogFacets.tagsFor(category).any { it.query.equals(activeTag, ignoreCase = true) }
+            val nextLiveFilter = state.liveFilter.toggleCategory(
+                category = category,
+                clearTagIfSwitchingCategory = isSwitchingBetweenCategories && !tagExistsInNewCategory,
+            )
+            val displayLabel = nextLiveFilter.displayInputText()
+            // Clear stale free-text search on the 4K Artworks tab when user pivots to a Live Category chip.
+            val cleanedStaticFilter = if (state.staticFilter.searchQuery.isNotBlank()) {
+                StaticFilterState()
+            } else {
+                state.staticFilter
+            }
+            state.copy(
+                liveFilter = nextLiveFilter,
+                staticFilter = cleanedStaticFilter,
+                isActiveColorSearch = false,
+                activeQuery = displayLabel.removePrefix("#").ifEmpty { WallpaperRepository.HOME_TRENDING_KEY },
+                searchInput = "",
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        loadFeed(forceRefresh = false)
+    }
+
+    fun toggleLiveSeries(series: String) {
+        searchDebounceJob?.cancel()
+        _rawState.update { state ->
+            val nextLiveFilter = state.liveFilter.toggleSeries(series)
+            val displayLabel = nextLiveFilter.displayInputText()
+            val syncedStaticFilter = nextLiveFilter.selectedSeries?.let {
+                StaticFilterState(searchQuery = it)
+            } ?: StaticFilterState()
+            state.copy(
+                liveFilter = nextLiveFilter,
+                staticFilter = syncedStaticFilter,
+                isActiveColorSearch = false,
+                activeQuery = displayLabel.removePrefix("#").ifEmpty { WallpaperRepository.HOME_TRENDING_KEY },
+                searchInput = "",
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        loadFeed(forceRefresh = false)
+    }
+
+    fun toggleLiveTag(tagQuery: String) {
+        searchDebounceJob?.cancel()
+        _rawState.update { state ->
+            val nextLiveFilter = state.liveFilter.toggleTag(tagQuery)
+            val displayLabel = nextLiveFilter.displayInputText()
+            val cleanedStaticFilter = if (state.staticFilter.searchQuery.isNotBlank()) {
+                StaticFilterState()
+            } else {
+                state.staticFilter
+            }
+            state.copy(
+                liveFilter = nextLiveFilter,
+                staticFilter = cleanedStaticFilter,
+                isActiveColorSearch = false,
+                activeQuery = displayLabel.removePrefix("#").ifEmpty { WallpaperRepository.HOME_TRENDING_KEY },
+                searchInput = "",
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        loadFeed(forceRefresh = false)
+    }
+
+    fun clearLiveFilters() {
+        searchDebounceJob?.cancel()
+        _rawState.update { state ->
+            state.copy(
+                liveFilter = LiveFilterState(),
+                staticFilter = StaticFilterState(),
+                isActiveColorSearch = false,
+                activeQuery = WallpaperRepository.HOME_TRENDING_KEY,
+                searchInput = "",
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        loadFeed(forceRefresh = false)
+    }
+
+    fun toggleStaticCategory(category: String) {
+        searchDebounceJob?.cancel()
+        var nextCategory: String? = null
+        _rawState.update { state ->
+            val nextStaticFilter = state.staticFilter.toggleCategory(category)
+            nextCategory = nextStaticFilter.selectedCategory
+            val cleanedLiveFilter = if (state.liveFilter.query.isNotBlank() || state.liveFilter.selectedSeries != null) {
+                LiveFilterState()
+            } else {
+                state.liveFilter
+            }
+            val scopeKey = buildStaticTagScopeKey(nextStaticFilter.selectedCategory, state.filter)
+            val cachedVerified = verifiedStaticTagsByScope[scopeKey]?.values?.toList().orEmpty()
+            state.copy(
+                staticFilter = nextStaticFilter,
+                liveFilter = cleanedLiveFilter,
+                isActiveColorSearch = false,
+                verifiedStaticTags = cachedVerified,
+                activeQuery = nextStaticFilter.toQueryKey(WallpaperRepository.HOME_TRENDING_KEY),
+                searchInput = "",
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        warmVerifiedStaticTags(
+            selectedCategory = nextCategory,
+            filter = _rawState.value.filter,
+            rotationSeed = 0,
+            targetNewProbes = 6,
+        )
+        loadFeed(forceRefresh = false)
+    }
+
+    fun toggleStaticTag(tagQuery: String) {
+        searchDebounceJob?.cancel()
+        _rawState.update { state ->
+            val nextStaticFilter = state.staticFilter.toggleTag(tagQuery)
+            val cleanedLiveFilter = if (state.liveFilter.query.isNotBlank() || state.liveFilter.selectedSeries != null) {
+                LiveFilterState()
+            } else {
+                state.liveFilter
+            }
+            state.copy(
+                staticFilter = nextStaticFilter,
+                liveFilter = cleanedLiveFilter,
+                isActiveColorSearch = false,
+                activeQuery = nextStaticFilter.toQueryKey(WallpaperRepository.HOME_TRENDING_KEY),
+                searchInput = "",
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        loadFeed(forceRefresh = false)
+    }
+
+    fun clearStaticFilters() {
+        searchDebounceJob?.cancel()
+        _rawState.update { state ->
+            val scopeKey = buildStaticTagScopeKey(null, state.filter)
+            val cachedVerified = verifiedStaticTagsByScope[scopeKey]?.values?.toList().orEmpty()
+            state.copy(
+                staticFilter = StaticFilterState(),
+                liveFilter = LiveFilterState(),
+                isActiveColorSearch = false,
+                verifiedStaticTags = cachedVerified,
+                activeQuery = WallpaperRepository.HOME_TRENDING_KEY,
+                searchInput = "",
+                searchSuggestions = emptyList(),
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        warmVerifiedStaticTags(
+            selectedCategory = null,
+            filter = _rawState.value.filter,
+            rotationSeed = _rawState.value.staticTagRotationVersion,
+            targetNewProbes = 6,
+        )
         loadFeed(forceRefresh = false)
     }
 
     fun selectTrendingTopic(topic: String) {
         searchDebounceJob?.cancel()
         val cleanedTopic = topic.trim().removePrefix("#").trim()
-        val currentActive = _rawState.value.activeQuery.trim().removePrefix("#").trim()
-        val isReset = cleanedTopic.isEmpty() ||
+        val isResetExplicit = cleanedTopic.isEmpty() ||
                 cleanedTopic.equals("all", ignoreCase = true) ||
-                cleanedTopic.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true) ||
-                currentActive.equals(cleanedTopic, ignoreCase = true)
-        val normalized = if (isReset) {
-            WallpaperRepository.HOME_TRENDING_KEY
+                cleanedTopic.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true)
+
+        if (_rawState.value.isLiveTab) {
+            if (isResetExplicit) {
+                clearLiveFilters()
+                return
+            }
+            val facets = _rawState.value.liveCatalogFacets
+            when {
+                facets.categories.any { it.query.equals(cleanedTopic, ignoreCase = true) } -> {
+                    toggleLiveCategory(cleanedTopic)
+                }
+                facets.series.any { it.query.equals(cleanedTopic, ignoreCase = true) } -> {
+                    toggleLiveSeries(cleanedTopic)
+                }
+                else -> {
+                    val synced = CrossTabSearchSync.syncFromSearch(
+                        rawQuery = cleanedTopic,
+                        homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+                    )
+                    _rawState.update { state ->
+                        state.copy(
+                            liveFilter = synced.liveFilter,
+                            staticFilter = synced.staticFilter,
+                            isActiveColorSearch = false,
+                            activeQuery = synced.activeQueryForLive,
+                            searchInput = "",
+                            searchSuggestions = emptyList(),
+                            scrollToTopSignal = state.scrollToTopSignal + 1,
+                        )
+                    }
+                    loadFeed(forceRefresh = false)
+                }
+            }
+            return
+        }
+
+        if (isResetExplicit) {
+            clearStaticFilters()
+            return
+        }
+
+        val isExploreCategory = AnimeCatalog.exploreCategories.any {
+            it.title.equals(cleanedTopic, ignoreCase = true) || it.query.equals(cleanedTopic, ignoreCase = true)
+        }
+        if (isExploreCategory) {
+            toggleStaticCategory(cleanedTopic)
+            return
+        }
+
+        val currentActive = _rawState.value.activeQuery.trim().removePrefix("#").trim()
+        val isReset = currentActive.equals(cleanedTopic, ignoreCase = true)
+        val synced = if (isReset) {
+            CrossTabSearchSync.syncFromSearch(
+                rawQuery = "",
+                homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+            )
         } else {
-            cleanedTopic
+            CrossTabSearchSync.syncFromSearch(
+                rawQuery = cleanedTopic,
+                homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+            )
         }
         _rawState.update {
             it.copy(
-                activeQuery = normalized,
-                searchInput = if (isReset) "" else topic.trim(),
+                staticFilter = synced.staticFilter,
+                liveFilter = synced.liveFilter,
+                isActiveColorSearch = false,
+                activeQuery = synced.activeQueryForStatic,
+                searchInput = "",
                 searchSuggestions = emptyList(),
                 scrollToTopSignal = it.scrollToTopSignal + 1,
             )
@@ -359,15 +737,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         searchDebounceJob?.cancel()
+        var staticCategoryToWarm: String? = null
         _rawState.update { state ->
+            val synced = CrossTabSearchSync.syncOnTabSwitch(
+                targetIsLive = isLive,
+                currentLiveFilter = state.liveFilter,
+                currentStaticFilter = state.staticFilter,
+                searchInput = state.searchInput,
+                isColorSearch = state.isActiveColorSearch,
+                homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+            )
+            staticCategoryToWarm = synced.staticFilter.selectedCategory
+            val scopeKey = buildStaticTagScopeKey(synced.staticFilter.selectedCategory, state.filter)
+            val cachedVerified = verifiedStaticTagsByScope[scopeKey]?.values?.toList().orEmpty()
             state.copy(
                 isLiveTab = isLive,
-                searchSuggestions = if (state.searchInput.isNotBlank()) {
-                    computeSearchSuggestions(state.searchInput, isLiveTab = isLive)
-                } else {
-                    emptyList()
-                },
+                liveFilter = synced.liveFilter,
+                staticFilter = synced.staticFilter,
+                verifiedStaticTags = if (!isLive) cachedVerified else state.verifiedStaticTags,
+                activeQuery = if (isLive) synced.activeQueryForLive else synced.activeQueryForStatic,
+                searchSuggestions = emptyList(),
                 scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        if (!isLive) {
+            warmVerifiedStaticTags(
+                selectedCategory = staticCategoryToWarm,
+                filter = _rawState.value.filter,
+                rotationSeed = _rawState.value.staticTagRotationVersion,
+                targetNewProbes = 6,
             )
         }
         loadFeed(forceRefresh = false)
@@ -411,24 +809,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun applyFilter(newFilter: WallpaperFilter) {
         searchDebounceJob?.cancel()
+        val filterChanged = _rawState.value.filter != newFilter
+        val activeStaticCategory = _rawState.value.staticFilter.selectedCategory
         _rawState.update {
+            val nextVerified = if (filterChanged) {
+                val scopeKey = buildStaticTagScopeKey(activeStaticCategory, newFilter)
+                verifiedStaticTagsByScope[scopeKey]?.values?.toList().orEmpty()
+            } else {
+                it.verifiedStaticTags
+            }
             it.copy(
                 filter = newFilter,
+                hiddenEmptyStaticCategories = if (filterChanged) emptySet() else it.hiddenEmptyStaticCategories,
+                verifiedStaticTags = nextVerified,
+                bannerMessage = null,
                 scrollToTopSignal = it.scrollToTopSignal + 1,
             )
         }
         viewModelScope.launch {
             settingsStore.setPreferredResolution(newFilter.resolution)
         }
+        if (filterChanged) {
+            searchCoverWarmupJob?.cancel()
+            warmVerifiedStaticTags(
+                selectedCategory = activeStaticCategory,
+                filter = newFilter,
+                rotationSeed = 0,
+                targetNewProbes = 6,
+            )
+            warmSearchCategoryCoverPools(forceReprobe = true)
+        }
         loadFeed(forceRefresh = false)
     }
 
     fun refreshFeed() {
+        val current = _rawState.value
+        val nowMs = System.currentTimeMillis()
+        if (current.isRefreshing || (nowMs - lastManualRefreshTriggeredAtMs) in 0L until 400L) {
+            return
+        }
+        lastManualRefreshTriggeredAtMs = nowMs
         searchDebounceJob?.cancel()
+        val isLive = current.isLiveTab
+        if (isLive) {
+            liveWallpaperRepository.rotateContentAndTags()
+        }
+        val nextRotation = if (!isLive) current.staticTagRotationVersion + 1 else current.staticTagRotationVersion
         _rawState.update {
             it.copy(
                 isRefreshing = true,
+                bannerMessage = null,
+                staticTagRotationVersion = nextRotation,
                 scrollToTopSignal = it.scrollToTopSignal + 1,
+            )
+        }
+        if (!isLive) {
+            // Probe a small fresh batch (max 3) in the background so pull-to-refresh reveals new
+            // API-verified hashtags without risking Wallhaven's 45 req/min rate limit.
+            warmVerifiedStaticTags(
+                selectedCategory = current.staticFilter.selectedCategory,
+                filter = current.filter,
+                rotationSeed = nextRotation,
+                targetNewProbes = 3,
             )
         }
         loadFeed(forceRefresh = true)
@@ -441,6 +883,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val expectedQuery = current.activeQuery
         val expectedIsLive = current.isLiveTab
         val expectedFilter = current.filter
+        val expectedLiveFilter = current.liveFilter
+        val expectedStaticFilter = current.staticFilter
 
         // Update synchronously before launch to prevent duplicate triggers in the same frame.
         _rawState.update { it.copy(isLoadingMore = true) }
@@ -454,11 +898,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     filter = expectedFilter,
                     page = nextPage,
                     forceRefresh = false,
+                    liveFilter = if (expectedIsLive) expectedLiveFilter else null,
+                    staticFilter = if (!expectedIsLive) expectedStaticFilter else null,
                 )
                 _rawState.update { state ->
                     if (state.activeQuery != expectedQuery ||
                         state.isLiveTab != expectedIsLive ||
-                        state.filter != expectedFilter
+                        state.filter != expectedFilter ||
+                        (expectedIsLive && state.liveFilter != expectedLiveFilter) ||
+                        (!expectedIsLive && state.staticFilter != expectedStaticFilter)
                     ) {
                         return@update state.copy(isLoadingMore = false)
                     }
@@ -479,7 +927,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         currentPage = if (addedNewItems) nextPage else state.currentPage,
                         hasMore = result.hasMore && addedNewItems,
                         isLoadingMore = false,
-                        bannerMessage = result.warningMessage ?: state.bannerMessage,
+                        bannerMessage = result.warningMessage ?: if (addedNewItems) null else state.bannerMessage,
                     )
                 }
             } catch (e: CancellationException) {
@@ -504,6 +952,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _rawState.update {
             it.copy(
                 isLiveTab = false,
+                staticFilter = StaticFilterState(searchQuery = category.query),
+                liveFilter = LiveFilterState(query = category.title),
+                isActiveColorSearch = false,
                 activeQuery = category.query,
                 searchInput = category.title,
                 searchSuggestions = emptyList(),
@@ -517,33 +968,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         query: String,
         isColorSearch: Boolean = false,
         preferLive: Boolean? = null,
+        facetType: FacetType? = null,
     ) {
         searchDebounceJob?.cancel()
         val raw = query.trim()
         val cleaned = raw.removePrefix("#").trim()
         val targetQuery = cleaned.ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
 
-        val currentIsLive = _rawState.value.isLiveTab
-        val isExploreDomain = AnimeCatalog.exploreCategories.any {
+        val matchedExploreCategory = AnimeCatalog.exploreCategories.firstOrNull {
             it.title.equals(targetQuery, ignoreCase = true) || it.query.equals(targetQuery, ignoreCase = true)
         }
+        val synced = CrossTabSearchSync.syncFromSearch(
+            rawQuery = raw,
+            isColorSearch = isColorSearch,
+            facetType = facetType,
+            matchedExploreCategoryTitle = matchedExploreCategory?.title,
+            homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
+        )
+
+        val currentIsLive = _rawState.value.isLiveTab
+        val isExploreDomain = matchedExploreCategory != null
         val resolvedIsLive = when {
             preferLive != null -> preferLive
             (isColorSearch || isExploreDomain) && currentIsLive -> {
                 // Keep Live tab if R2 JSON has matching wallpapers for this color/domain; otherwise switch to 4K Artworks so user sees rich results immediately.
-                val liveMatches = liveWallpaperRepository.getCachedCatalogSnapshot(targetQuery)?.items.orEmpty()
+                val liveMatches = liveWallpaperRepository.getCachedCatalogSnapshot(synced.liveFilter)?.items.orEmpty()
                 liveMatches.isNotEmpty()
             }
             else -> currentIsLive
         }
 
-        _rawState.update {
-            it.copy(
+        val displaySearchInput = when {
+            targetQuery == WallpaperRepository.HOME_TRENDING_KEY -> ""
+            !resolvedIsLive && synced.staticFilter.isChipFilterActive -> ""
+            else -> synced.searchInput
+        }
+
+        _rawState.update { state ->
+            val scopeKey = buildStaticTagScopeKey(synced.staticFilter.selectedCategory, state.filter)
+            val cachedVerified = verifiedStaticTagsByScope[scopeKey]?.values?.toList().orEmpty()
+            // Single Source of Truth: ALWAYS synchronize BOTH liveFilter AND staticFilter together
+            // so switching between Live Wallpapers and 4K Artworks never resurrects stale search results.
+            state.copy(
                 isLiveTab = resolvedIsLive,
-                activeQuery = targetQuery,
-                searchInput = if (targetQuery == WallpaperRepository.HOME_TRENDING_KEY) "" else raw,
+                liveFilter = synced.liveFilter,
+                staticFilter = synced.staticFilter,
+                isActiveColorSearch = isColorSearch,
+                verifiedStaticTags = if (!resolvedIsLive) cachedVerified else state.verifiedStaticTags,
+                activeQuery = if (resolvedIsLive) synced.activeQueryForLive else synced.activeQueryForStatic,
+                searchInput = displaySearchInput,
                 searchSuggestions = emptyList(),
-                scrollToTopSignal = it.scrollToTopSignal + 1,
+                scrollToTopSignal = state.scrollToTopSignal + 1,
+            )
+        }
+        if (synced.staticFilter.selectedCategory != null) {
+            warmVerifiedStaticTags(
+                selectedCategory = synced.staticFilter.selectedCategory,
+                filter = _rawState.value.filter,
+                rotationSeed = 0,
+                targetNewProbes = 6,
             )
         }
         loadFeed(forceRefresh = false)
@@ -577,8 +1060,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun requestAnimeCategoryPreviews(visibleCategories: List<AnimeCategory>) {
         if (visibleCategories.isEmpty()) return
         val activeFilter = _rawState.value.filter
-        categoryPreviewJob?.cancel()
-        categoryPreviewJob = viewModelScope.launch {
+        viewModelScope.launch {
             // Phase 1: Instant local hydration from Room + R2 cache (0 network calls)
             for (category in visibleCategories) {
                 val existing = _animeCategoryPreviews.value[category.id]
@@ -589,10 +1071,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // Phase 2: Throttled network fetch for visible rows still needing 4 photos or total count
+            // Phase 2: Parallel throttled fetch (up to 3 visible rows concurrently) without
+            // cancelling already-in-flight row loads when the user scrolls slightly.
             for (category in visibleCategories) {
                 val current = _animeCategoryPreviews.value[category.id]
                 if (current != null && current.thumbnailUrls.size >= 4 && current.totalCount > 4 && !current.isLoading) {
+                    continue
+                }
+                if (!inFlightCategoryPreviewIds.add(category.id)) {
                     continue
                 }
                 if (current == null || current.thumbnailUrls.isEmpty()) {
@@ -605,18 +1091,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                     }
                 }
-                val fetched = try {
-                    repository.fetchAnimeCategoryPreview(category, activeFilter)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    current?.copy(isLoading = false) ?: AnimeSeriesPreview(categoryId = category.id, isLoading = false)
+                launch {
+                    try {
+                        categoryPreviewSemaphore.acquire()
+                        val fetched = try {
+                            repository.fetchAnimeCategoryPreview(category, activeFilter)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            current?.copy(isLoading = false)
+                                ?: AnimeSeriesPreview(categoryId = category.id, isLoading = false)
+                        }
+                        _animeCategoryPreviews.update { map -> map + (category.id to fetched) }
+                        if (fetched.thumbnailUrls.isNotEmpty()) {
+                            enqueueImageWarmup(fetched.thumbnailUrls, widthPx = 240, heightPx = 420)
+                        }
+                    } finally {
+                        categoryPreviewSemaphore.release()
+                        inFlightCategoryPreviewIds.remove(category.id)
+                    }
                 }
-                _animeCategoryPreviews.update { map -> map + (category.id to fetched) }
-                if (fetched.thumbnailUrls.isNotEmpty()) {
-                    enqueueImageWarmup(fetched.thumbnailUrls, widthPx = 240, heightPx = 420)
-                }
-                delay(150L)
             }
         }
     }
@@ -797,19 +1291,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun warmSearchCategoryCoverPools() {
-        if (searchCoverWarmupJob?.isActive == true) return
+    private fun warmSearchCategoryCoverPools(forceReprobe: Boolean = false) {
+        if (!forceReprobe && searchCoverWarmupJob?.isActive == true) return
         val activeFilter = _rawState.value.filter
         searchCoverWarmupJob = viewModelScope.launch(Dispatchers.IO) {
             // Phase 1: Instant parallel Room cache hydration for all 12 categories (0 network, 0 delay).
-            val missingFromMemory = AnimeCatalog.exploreCategories.filter { topic ->
-                val existingPool = categoryStaticPools[topic.title]
-                existingPool == null || existingPool.size < 4
+            val targetCategories = if (forceReprobe) {
+                AnimeCatalog.exploreCategories
+            } else {
+                AnimeCatalog.exploreCategories.filter { topic ->
+                    val existingPool = categoryStaticPools[topic.title]
+                    existingPool == null || existingPool.size < 4
+                }
             }
-            if (missingFromMemory.isEmpty()) return@launch
+            if (targetCategories.isEmpty()) return@launch
 
             val cachedResults = coroutineScope {
-                missingFromMemory.map { topic ->
+                targetCategories.map { topic ->
                     async {
                         val urls = runCatching {
                             repository.getCachedExploreCategoryStaticCovers(
@@ -842,14 +1340,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (stillMissing.isEmpty()) return@launch
 
             // Phase 2: Bounded parallel network warmup (3 concurrent fetches, zero artificial sleep)
-            // so cold-start category covers populate in ~1s instead of 5-8s sequential stalls.
+            // so cold-start category covers populate in ~1s and confirmed-empty categories hide automatically.
             val semaphore = Semaphore(permits = 3)
             coroutineScope {
                 stillMissing.map { topic ->
                     async {
                         semaphore.withPermit {
-                            val urls = try {
-                                repository.getExploreCategoryStaticCovers(
+                            val probe = try {
+                                repository.probeExploreCategoryStaticCovers(
                                     topic = topic,
                                     filter = activeFilter,
                                     maxCount = 10,
@@ -857,11 +1355,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (_: Exception) {
-                                emptyList()
+                                com.example.data.repository.ExploreCategoryProbeResult(
+                                    coverUrls = emptyList(),
+                                    confirmedEmpty = false,
+                                )
                             }
 
-                            if (urls.isNotEmpty()) {
+                            if (probe.confirmedEmpty) {
+                                _rawState.update { state ->
+                                    if (state.filter != activeFilter) return@update state
+                                    state.copy(
+                                        hiddenEmptyStaticCategories = state.hiddenEmptyStaticCategories +
+                                                topic.title.lowercase(),
+                                    )
+                                }
+                            } else if (probe.coverUrls.isNotEmpty()) {
+                                val urls = probe.coverUrls
                                 categoryStaticPools[topic.title] = urls
+                                _rawState.update { state ->
+                                    if (state.filter != activeFilter) return@update state
+                                    val key = topic.title.lowercase()
+                                    if (key in state.hiddenEmptyStaticCategories) {
+                                        state.copy(hiddenEmptyStaticCategories = state.hiddenEmptyStaticCategories - key)
+                                    } else {
+                                        state
+                                    }
+                                }
                                 enqueueImageWarmup(urls.take(2), widthPx = 300, heightPx = 400)
                                 _searchCategoryCovers.update { currentMap ->
                                     if (currentMap.containsKey(topic.title)) {
@@ -884,8 +1403,135 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun buildStaticTagScopeKey(
+        selectedCategory: String?,
+        filter: WallpaperFilter,
+    ): String {
+        val cat = selectedCategory?.trim()?.lowercase().orEmpty()
+        return "${filter.resolution.name}_${filter.ratio.name}_${filter.sort.name}|$cat"
+    }
+
+    /**
+     * Verifies candidate static 4K Artworks #Tags against local Room cache (Phase 1, 0ms) and
+     * the real Wallhaven API (Phase 2, quota-protected) so ONLY hashtags confirmed to have > 0
+     * images are ever rendered in the UI — both on cold start and after Pull-to-Refresh.
+     */
+    private fun warmVerifiedStaticTags(
+        selectedCategory: String?,
+        filter: WallpaperFilter,
+        rotationSeed: Int,
+        targetNewProbes: Int = 6,
+    ) {
+        val scopeKey = buildStaticTagScopeKey(selectedCategory, filter)
+        val candidatePool = getStaticTagCandidatePool(selectedCategory)
+        if (candidatePool.isEmpty()) return
+
+        staticTagProbeJob?.cancel()
+        staticTagProbeJob = viewModelScope.launch(Dispatchers.IO) {
+            val verifiedMap = verifiedStaticTagsByScope.computeIfAbsent(scopeKey) { LinkedHashMap() }
+            val emptySet = emptyStaticTagsByScope.computeIfAbsent(scopeKey) { ConcurrentHashMap.newKeySet() }
+
+            // Phase 1: Instant local Room hydration across the whole pool (0 network requests)
+            for (chip in candidatePool) {
+                val keyLower = chip.query.lowercase()
+                if (keyLower in emptySet) continue
+                if (synchronized(verifiedMap) { verifiedMap.containsKey(keyLower) }) continue
+                val cachedCount = runCatching {
+                    repository.getCachedStaticTagCount(
+                        tag = chip.query,
+                        selectedCategory = selectedCategory,
+                        filter = filter,
+                    )
+                }.getOrDefault(0)
+                if (cachedCount > 0) {
+                    synchronized(verifiedMap) {
+                        verifiedMap[keyLower] = chip.copy(count = cachedCount)
+                    }
+                }
+            }
+
+            fun publishVerifiedSnapshot() {
+                val snapshot = synchronized(verifiedMap) { verifiedMap.values.toList() }
+                _rawState.update { state ->
+                    if (state.filter != filter ||
+                        !state.staticFilter.selectedCategory.equals(selectedCategory, ignoreCase = true)
+                    ) {
+                        state
+                    } else {
+                        state.copy(verifiedStaticTags = snapshot)
+                    }
+                }
+            }
+
+            publishVerifiedSnapshot()
+
+            // Determine which unprobed candidates to check next, rotating offset on pull-to-refresh
+            // so fresh themes get verified and added to the verified pool.
+            val startOffset = if (rotationSeed > 0) (rotationSeed * 4) % candidatePool.size else 0
+            val orderedCandidates = List(candidatePool.size) { idx ->
+                candidatePool[(startOffset + idx) % candidatePool.size]
+            }
+            val alreadyVerifiedCount = synchronized(verifiedMap) { verifiedMap.size }
+            val desiredProbes = if (alreadyVerifiedCount >= 10 && rotationSeed == 0) {
+                0
+            } else {
+                targetNewProbes
+            }
+            if (desiredProbes <= 0) return@launch
+
+            val toProbe = orderedCandidates
+                .filter { chip ->
+                    val keyLower = chip.query.lowercase()
+                    keyLower !in emptySet && synchronized(verifiedMap) { !verifiedMap.containsKey(keyLower) }
+                }
+                .take(desiredProbes)
+            if (toProbe.isEmpty()) return@launch
+
+            // Phase 2: Bounded parallel Wallhaven probing (2 concurrent, strictly respects 45 req/min quota)
+            val semaphore = Semaphore(permits = 2)
+            coroutineScope {
+                toProbe.map { chip ->
+                    async {
+                        semaphore.withPermit {
+                            val probe = try {
+                                repository.probeStaticTagAvailability(
+                                    tag = chip.query,
+                                    selectedCategory = selectedCategory,
+                                    filter = filter,
+                                )
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                com.example.data.repository.StaticTagProbeResult(
+                                    tag = chip.query,
+                                    matchCount = 0,
+                                    confirmedEmpty = false,
+                                )
+                            }
+                            val keyLower = chip.query.lowercase()
+                            if (probe.matchCount > 0) {
+                                synchronized(verifiedMap) {
+                                    verifiedMap[keyLower] = chip.copy(count = probe.matchCount)
+                                }
+                                publishVerifiedSnapshot()
+                            } else if (probe.confirmedEmpty) {
+                                emptySet.add(keyLower)
+                                synchronized(verifiedMap) {
+                                    verifiedMap.remove(keyLower)
+                                }
+                                publishVerifiedSnapshot()
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+    }
+
     private fun loadFeed(forceRefresh: Boolean) {
         val current = _rawState.value
+        val activeLiveFilter = if (current.isLiveTab) current.liveFilter else null
+        val activeStaticFilter = if (!current.isLiveTab) current.staticFilter else null
         loadMoreJob?.cancel()
         feedJob?.cancel()
         feedJob = viewModelScope.launch {
@@ -894,13 +1540,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isLive = current.isLiveTab,
                 filter = current.filter,
                 page = 1,
+                liveFilter = activeLiveFilter,
+                staticFilter = activeStaticFilter,
             )
+            val cachedLiveTotal = if (activeLiveFilter != null) {
+                liveWallpaperRepository.getCachedCatalogSnapshot(activeLiveFilter, page = 1)?.totalCount
+            } else {
+                null
+            }
             val cacheIsFresh = if (localSnapshot.isNotEmpty()) {
                 repository.isFeedCacheFresh(
                     query = current.activeQuery,
                     isLive = current.isLiveTab,
                     filter = current.filter,
                     page = 1,
+                    liveFilter = activeLiveFilter,
+                    staticFilter = activeStaticFilter,
                 )
             } else {
                 false
@@ -908,27 +1563,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             if (localSnapshot.isNotEmpty()) {
                 val needsNetworkRefresh = forceRefresh || !cacheIsFresh
-                _rawState.update { state ->
-                    val banners = if (!current.isLiveTab &&
-                        (state.trendingBanners.isEmpty() || current.activeQuery == WallpaperRepository.HOME_TRENDING_KEY)
-                    ) {
-                        pickDistinctSeriesBanners(localSnapshot, limit = 10)
-                    } else {
-                        state.trendingBanners
-                    }
-                    state.copy(
-                        feedStatus = FeedStatus.Success(localSnapshot),
-                        trendingBanners = banners,
-                        bannerMessage = null,
-                        isRefreshing = needsNetworkRefresh,
-                        currentPage = 1,
-                        hasMore = if (current.isLiveTab) {
-                            localSnapshot.size >= com.example.data.repository.LiveWallpaperRepository.DEFAULT_PAGE_SIZE
+                val skipPreUpdateForStaticRefresh = forceRefresh && !current.isLiveTab
+                if (!skipPreUpdateForStaticRefresh) {
+                    _rawState.update { state ->
+                        val banners = if (!current.isLiveTab &&
+                            (state.trendingBanners.isEmpty() || current.activeQuery == WallpaperRepository.HOME_TRENDING_KEY)
+                        ) {
+                            pickDistinctSeriesBanners(localSnapshot, limit = 10)
                         } else {
-                            true
-                        },
-                        isLoadingMore = false,
-                    )
+                            state.trendingBanners
+                        }
+                        state.copy(
+                            feedStatus = FeedStatus.Success(localSnapshot),
+                            liveTotalCount = cachedLiveTotal ?: state.liveTotalCount,
+                            trendingBanners = banners,
+                            bannerMessage = null,
+                            isRefreshing = needsNetworkRefresh,
+                            currentPage = 1,
+                            hasMore = if (current.isLiveTab) {
+                                localSnapshot.size >= com.example.data.repository.LiveWallpaperRepository.DEFAULT_PAGE_SIZE
+                            } else {
+                                true
+                            },
+                            isLoadingMore = false,
+                        )
+                    }
                 }
 
                 // Static feed with fresh Room cache: 0 network requests to Wallhaven!
@@ -940,6 +1599,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _rawState.update {
                     it.copy(
                         feedStatus = FeedStatus.Loading,
+                        liveTotalCount = if (current.isLiveTab) null else it.liveTotalCount,
                         bannerMessage = null,
                         currentPage = 1,
                         hasMore = !current.isLiveTab,
@@ -955,6 +1615,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     filter = current.filter,
                     page = 1,
                     forceRefresh = forceRefresh,
+                    liveFilter = activeLiveFilter,
+                    staticFilter = activeStaticFilter,
                 )
             } catch (e: CancellationException) {
                 throw e
@@ -978,15 +1640,85 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 runCatching {
                     Log.d(
                         "LIVE_DEBUG",
-                        "Live tab loaded ${resolvedItems.size} items (query=${current.activeQuery}, warning=${result.warningMessage})",
+                        "Live tab loaded ${resolvedItems.size} items (filter=${current.liveFilter.cacheKey()}, warning=${result.warningMessage})",
                     )
                 }
             }
+
+            // Auto-hide empty static categories or hashtags confirmed by API (HTTP 200 with 0 items)
+            // and smoothly return to the parent scope instead of showing an empty screen.
+            val emptySelectedStaticTag = if (!current.isLiveTab &&
+                current.staticFilter.selectedTag != null &&
+                resolvedItems.isEmpty() &&
+                result.warningMessage == null &&
+                !result.rateLimited
+            ) {
+                current.staticFilter.selectedTag
+            } else {
+                null
+            }
+            if (emptySelectedStaticTag != null) {
+                val scopeKey = buildStaticTagScopeKey(current.staticFilter.selectedCategory, current.filter)
+                val emptyKey = emptySelectedStaticTag.lowercase()
+                emptyStaticTagsByScope.computeIfAbsent(scopeKey) { ConcurrentHashMap.newKeySet() }.add(emptyKey)
+                val verifiedMap = verifiedStaticTagsByScope[scopeKey]
+                val updatedVerified = if (verifiedMap != null) {
+                    synchronized(verifiedMap) {
+                        verifiedMap.remove(emptyKey)
+                        verifiedMap.values.toList()
+                    }
+                } else {
+                    emptyList()
+                }
+                val fallbackFilter = StaticFilterState(selectedCategory = current.staticFilter.selectedCategory)
+                _rawState.update { state ->
+                    state.copy(
+                        staticFilter = fallbackFilter,
+                        verifiedStaticTags = updatedVerified,
+                        activeQuery = fallbackFilter.toQueryKey(WallpaperRepository.HOME_TRENDING_KEY),
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                    )
+                }
+                loadFeed(forceRefresh = false)
+                return@launch
+            }
+
+            val emptySelectedStaticCategory = if (!current.isLiveTab &&
+                current.staticFilter.selectedCategory != null &&
+                current.staticFilter.selectedTag == null &&
+                resolvedItems.isEmpty() &&
+                result.warningMessage == null &&
+                !result.rateLimited
+            ) {
+                current.staticFilter.selectedCategory
+            } else {
+                null
+            }
+            if (emptySelectedStaticCategory != null) {
+                _rawState.update { state ->
+                    state.copy(
+                        hiddenEmptyStaticCategories = state.hiddenEmptyStaticCategories +
+                                emptySelectedStaticCategory.lowercase(),
+                        staticFilter = StaticFilterState(),
+                        activeQuery = WallpaperRepository.HOME_TRENDING_KEY,
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                    )
+                }
+                loadFeed(forceRefresh = false)
+                return@launch
+            }
+
             _rawState.update { state ->
                 val status = if (resolvedItems.isNotEmpty()) {
                     FeedStatus.Success(resolvedItems)
                 } else {
-                    val label = if (current.activeQuery == WallpaperRepository.HOME_TRENDING_KEY) {
+                    val label = if (current.isLiveTab) {
+                        current.liveFilter.summaryLabel().ifBlank { "Live Wallpapers" }
+                    } else if (current.staticFilter.isChipFilterActive) {
+                        current.staticFilter.summaryLabel().ifBlank { current.activeQuery }
+                    } else if (current.activeQuery == WallpaperRepository.HOME_TRENDING_KEY) {
                         "Hot Anime"
                     } else {
                         current.activeQuery
@@ -995,8 +1727,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val suggested = buildList {
                             state.liveCatalogFacets.categories.take(2).forEach { add("\"${it.label}\"") }
                             state.liveCatalogFacets.tags.take(2).forEach { add("\"${it.label}\"") }
-                        }.take(3).ifEmpty { listOf("\"Frieren\"", "\"Bleach\"", "\"#magic\"") }
-                        "No live wallpapers matched \"$label\" in title, #tags, or category. Try ${suggested.joinToString(", ")}."
+                        }.take(3).ifEmpty { listOf("\"Anime\"", "\"Games\"", "\"#dark\"") }
+                        "No live wallpapers matched \"$label\". Try ${suggested.joinToString(", ")}."
                     } else {
                         "No ${current.filter.resolution.label} wallpapers found for \"$label\"."
                     }
@@ -1011,8 +1743,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 state.copy(
                     feedStatus = status,
+                    liveTotalCount = if (current.isLiveTab) (result.totalCount ?: resolvedItems.size) else null,
                     trendingBanners = banners,
-                    bannerMessage = result.warningMessage,
+                    bannerMessage = if (resolvedItems.isNotEmpty()) result.warningMessage else null,
                     isRefreshing = false,
                     currentPage = 1,
                     hasMore = result.hasMore,
@@ -1067,15 +1800,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setStaticWallpaper(wallpaper: AppWallpaper, target: WallpaperTarget) {
+        if (_rawState.value.isProcessingAction) return
         viewModelScope.launch {
             _rawState.update {
                 it.copy(
                     isProcessingAction = true,
-                    processingLabel = "Cropping bitmap for screen…",
+                    liveDownloadProgress = 2,
+                    processingLabel = "Preparing wallpaper…",
                 )
             }
-            val result = bitmapCropper.setStaticWallpaper(wallpaper.imageUrl, target)
-            _rawState.update { it.copy(isProcessingAction = false, processingLabel = null) }
+            val result = bitmapCropper.setStaticWallpaper(
+                imageUrl = wallpaper.imageUrl,
+                target = target,
+                fallbackThumbnailUrl = wallpaper.thumbnailUrl,
+                onProgress = { percent, statusLabel ->
+                    _rawState.update { state ->
+                        state.copy(
+                            isProcessingAction = true,
+                            liveDownloadProgress = percent.coerceIn(0, 100),
+                            processingLabel = statusLabel,
+                        )
+                    }
+                },
+            )
+            _rawState.update {
+                it.copy(
+                    isProcessingAction = false,
+                    liveDownloadProgress = null,
+                    processingLabel = null,
+                )
+            }
             result.fold(
                 onSuccess = {
                     _rawState.update { it.copy(appliedSuccessTarget = target.label) }
@@ -1083,7 +1837,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 onFailure = { err ->
                     _events.emit(
-                        UiEvent.ShowMessage(err.message ?: "Could not apply wallpaper"),
+                        UiEvent.ShowMessage(err.message ?: "Could not apply wallpaper. Please try again."),
                     )
                 },
             )

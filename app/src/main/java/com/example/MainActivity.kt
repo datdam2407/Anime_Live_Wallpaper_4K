@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import com.kuroanimelivewallpapers.app.BuildConfig
 import com.kuroanimelivewallpapers.app.R
@@ -122,6 +123,9 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         setContent {
             KuroWallTheme {
                 KuroWallAppRoot()
@@ -209,19 +213,26 @@ private fun KuroWallAppRoot(
         }
     }
 
-    DisposableEffect(nativeAdManager) {
+    DisposableEffect(nativeAdManager, activity) {
         onDispose {
-            nativeAdManager.clearBuffer()
+            if (activity?.isChangingConfigurations != true) {
+                nativeAdManager.clearBuffer()
+            }
         }
     }
 
-    LaunchedEffect(interstitialAdManager) {
+    LaunchedEffect(viewModel, interstitialAdManager) {
         viewModel.events.collect { event ->
             when (event) {
-                is UiEvent.ShowMessage -> snackbarHostState.showSnackbar(
-                    message = event.text,
-                    duration = SnackbarDuration.Short,
-                )
+                is UiEvent.ShowMessage -> {
+                    coroutineScope.launch {
+                        snackbarHostState.currentSnackbarData?.dismiss()
+                        snackbarHostState.showSnackbar(
+                            message = event.text,
+                            duration = SnackbarDuration.Short,
+                        )
+                    }
+                }
                 is UiEvent.LaunchLiveWallpaperChooser -> {
                     launchAlternatingLiveWallpaperPicker(event.target)
                 }
@@ -249,15 +260,21 @@ private fun KuroWallAppRoot(
                     try {
                         (activity ?: context).startActivity(emailIntent)
                     } catch (_: ActivityNotFoundException) {
-                        snackbarHostState.showSnackbar(
-                            message = "No email app installed. Please send requests to ${event.targetEmail}.",
-                            duration = SnackbarDuration.Long,
-                        )
+                        coroutineScope.launch {
+                            snackbarHostState.currentSnackbarData?.dismiss()
+                            snackbarHostState.showSnackbar(
+                                message = "No email app installed. Please send requests to ${event.targetEmail}.",
+                                duration = SnackbarDuration.Long,
+                            )
+                        }
                     } catch (_: Exception) {
-                        snackbarHostState.showSnackbar(
-                            message = "Unable to open email client. Contact ${event.targetEmail}.",
-                            duration = SnackbarDuration.Long,
-                        )
+                        coroutineScope.launch {
+                            snackbarHostState.currentSnackbarData?.dismiss()
+                            snackbarHostState.showSnackbar(
+                                message = "Unable to open email client. Contact ${event.targetEmail}.",
+                                duration = SnackbarDuration.Long,
+                            )
+                        }
                     }
                 }
                 UiEvent.WallpaperApplied -> {
@@ -284,13 +301,18 @@ private fun KuroWallAppRoot(
     var searchScrollTopTick by rememberSaveable { mutableIntStateOf(0) }
     var settingsScrollTopTick by rememberSaveable { mutableIntStateOf(0) }
 
-    fun navigateTopLevel(route: Any) {
-        when (route) {
-            HomeRoute -> homeScrollTopTick++
-            CategoriesRoute -> categoriesScrollTopTick++
-            SearchRoute -> searchScrollTopTick++
-            SettingsRoute -> settingsScrollTopTick++
+    fun navigateTopLevel(route: Any, forceScrollToTop: Boolean = false) {
+        val isReselectingCurrentTab = currentDestination?.hasRoute(route::class) == true
+        if (isReselectingCurrentTab || forceScrollToTop) {
+            when (route) {
+                HomeRoute -> homeScrollTopTick++
+                CategoriesRoute -> categoriesScrollTopTick++
+                SearchRoute -> searchScrollTopTick++
+                SettingsRoute -> settingsScrollTopTick++
+            }
         }
+        if (isReselectingCurrentTab) return
+
         navController.navigate(route) {
             popUpTo(navController.graph.findStartDestination().id) {
                 saveState = true
@@ -391,6 +413,7 @@ private fun KuroWallAppRoot(
                 if (useNavigationRail) {
                     NavigationRail(
                         containerColor = ObsidianSurface,
+                        windowInsets = WindowInsets(0, 0, 0, 0),
                     ) {
                         topDestinations.forEach { dest ->
                             val selected = currentDestination?.hasRoute(dest.route::class) == true ||
@@ -472,8 +495,14 @@ private fun KuroWallAppRoot(
                                     favoriteIdsState = favoriteIdsState,
                                     onSearchInputChange = viewModel::onSearchInputChange,
                                     onSubmitSearch = { viewModel.submitSearch() },
-                                    onSelectSuggestion = { query -> viewModel.submitSearch(query) },
+                                    onSelectSuggestion = viewModel::selectSearchSuggestion,
                                     onSelectTrendingTopic = viewModel::selectTrendingTopic,
+                                    onToggleStaticCategory = viewModel::toggleStaticCategory,
+                                    onToggleStaticTag = viewModel::toggleStaticTag,
+                                    onClearStaticFilters = viewModel::clearStaticFilters,
+                                    onToggleLiveCategory = viewModel::toggleLiveCategory,
+                                    onToggleLiveTag = viewModel::toggleLiveTag,
+                                    onClearLiveFilters = viewModel::clearLiveFilters,
                                     onSelectTab = viewModel::selectTab,
                                     onApplyFilter = viewModel::applyFilter,
                                     onRefresh = viewModel::refreshFeed,
@@ -517,20 +546,23 @@ private fun KuroWallAppRoot(
 
                             composable<SearchRoute> {
                                 val liveFacets by viewModel.searchLiveFacets.collectAsStateWithLifecycle()
+                                val verifiedStaticTags by viewModel.searchVerifiedStaticTags.collectAsStateWithLifecycle()
                                 val trendingBanners by viewModel.searchTrendingBanners.collectAsStateWithLifecycle()
                                 val searchCategoryCovers by viewModel.searchCategoryCovers.collectAsStateWithLifecycle()
                                 SearchScreen(
                                     liveFacets = liveFacets,
+                                    verifiedStaticTags = verifiedStaticTags,
                                     trendingBanners = trendingBanners,
                                     categoryCovers = searchCategoryCovers,
                                     onComputeSuggestions = viewModel::getUnifiedSearchSuggestions,
-                                    onSearchSubmit = { query, isColorSearch, preferLive ->
+                                    onSearchSubmit = { query, isColorSearch, preferLive, facetType ->
                                         viewModel.searchFromSearchScreen(
                                             query = query,
                                             isColorSearch = isColorSearch,
                                             preferLive = preferLive,
+                                            facetType = facetType,
                                         )
-                                        navigateTopLevel(HomeRoute)
+                                        navigateTopLevel(HomeRoute, forceScrollToTop = true)
                                     },
                                     onScreenEntered = viewModel::onSearchScreenEntered,
                                     scrollToTopTick = searchScrollTopTick,
@@ -579,7 +611,7 @@ private fun KuroWallAppRoot(
                                         } else {
                                             viewModel.selectTab(true)
                                             viewModel.notifySelectLiveWallpaperFirst()
-                                            navigateTopLevel(HomeRoute)
+                                            navigateTopLevel(HomeRoute, forceScrollToTop = true)
                                         }
                                     },
                                     onClearDownloadedLiveVideos = viewModel::clearDownloadedLiveVideos,
@@ -620,24 +652,64 @@ private fun KuroWallAppRoot(
                                 },
                             ) { entry ->
                                 val route = entry.toRoute<DetailRoute>()
-                                val homeState by viewModel.homeState.collectAsStateWithLifecycle()
-                                val collectionDetailState by viewModel.collectionDetailState.collectAsStateWithLifecycle()
-                                val favorites by viewModel.favorites.collectAsStateWithLifecycle()
+                                val actionState by viewModel.detailActionState.collectAsStateWithLifecycle()
                                 val favoriteIdsState = viewModel.favoriteIds.collectAsStateWithLifecycle()
                                 val settings by viewModel.settings.collectAsStateWithLifecycle()
                                 val isCollectionSource = route.feedSource == DetailRoute.FEED_COLLECTION
                                 val isMainSource = route.feedSource == DetailRoute.FEED_MAIN
-                                val feed = remember(route.feedSource, homeState.feedStatus, collectionDetailState.items, favorites) {
-                                    viewModel.getCurrentFeedList(route.feedSource)
+
+                                val feed: List<com.example.domain.model.AppWallpaper>
+                                val totalCountHint: Int?
+                                val isLoadingFeed: Boolean
+                                val hasMore: Boolean
+                                val isLoadingMore: Boolean
+
+                                when {
+                                    isCollectionSource -> {
+                                        val collectionDetailState by viewModel.collectionDetailState.collectAsStateWithLifecycle()
+                                        feed = collectionDetailState.items
+                                        totalCountHint = collectionDetailState.totalCount
+                                        isLoadingFeed = collectionDetailState.isLoadingInitial
+                                        hasMore = collectionDetailState.hasMore
+                                        isLoadingMore = collectionDetailState.isLoadingMore
+                                    }
+                                    isMainSource -> {
+                                        val homeState by viewModel.homeState.collectAsStateWithLifecycle()
+                                        feed = remember(homeState.feedStatus, homeState.trendingBanners) {
+                                            when (val status = homeState.feedStatus) {
+                                                is FeedStatus.Success -> status.items
+                                                else -> homeState.trendingBanners
+                                            }
+                                        }
+                                        totalCountHint = null
+                                        isLoadingFeed = false
+                                        hasMore = homeState.hasMore
+                                        isLoadingMore = homeState.isLoadingMore
+                                    }
+                                    else -> {
+                                        val favorites by viewModel.favorites.collectAsStateWithLifecycle()
+                                        feed = remember(route.feedSource, favorites) {
+                                            when (route.feedSource) {
+                                                DetailRoute.FEED_FAVORITES_STATIC -> favorites.filter { !it.isLive }
+                                                DetailRoute.FEED_FAVORITES_LIVE -> favorites.filter { it.isLive }
+                                                else -> favorites
+                                            }
+                                        }
+                                        totalCountHint = null
+                                        isLoadingFeed = false
+                                        hasMore = false
+                                        isLoadingMore = false
+                                    }
                                 }
+
                                 DetailPreviewScreen(
                                     wallpapers = feed,
                                     initialIndex = route.startIndex,
                                     favoriteIdsState = favoriteIdsState,
-                                    isProcessing = homeState.isProcessingAction,
-                                    processingLabel = homeState.processingLabel,
-                                    liveDownloadProgress = homeState.liveDownloadProgress,
-                                    appliedSuccessTarget = homeState.appliedSuccessTarget,
+                                    isProcessing = actionState.isProcessingAction,
+                                    processingLabel = actionState.processingLabel,
+                                    liveDownloadProgress = actionState.liveDownloadProgress,
+                                    appliedSuccessTarget = actionState.appliedSuccessTarget,
                                     muteLiveAudio = settings.muteLiveWallpaper,
                                     onBack = {
                                         interstitialAdManager.onDetailBackClicked(activity) {
@@ -651,18 +723,10 @@ private fun KuroWallAppRoot(
                                     onDetailImageViewed = { wallpaperId ->
                                         interstitialAdManager.onDetailImageViewed(wallpaperId)
                                     },
-                                    totalCountHint = if (isCollectionSource) collectionDetailState.totalCount else null,
-                                    isLoadingFeed = isCollectionSource && collectionDetailState.isLoadingInitial,
-                                    hasMore = when {
-                                        isCollectionSource -> collectionDetailState.hasMore
-                                        isMainSource -> homeState.hasMore
-                                        else -> false
-                                    },
-                                    isLoadingMore = when {
-                                        isCollectionSource -> collectionDetailState.isLoadingMore
-                                        isMainSource -> homeState.isLoadingMore
-                                        else -> false
-                                    },
+                                    totalCountHint = totalCountHint,
+                                    isLoadingFeed = isLoadingFeed,
+                                    hasMore = hasMore,
+                                    isLoadingMore = isLoadingMore,
                                     onLoadMore = {
                                         when {
                                             isCollectionSource -> viewModel.loadMoreCollectionDetail()

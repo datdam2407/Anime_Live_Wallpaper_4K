@@ -10,6 +10,11 @@ import com.example.data.remote.WallhavenResponse
 import com.example.data.repository.LiveWallpaperRepository
 import com.example.domain.model.AnimeSeriesPreview
 import com.example.domain.model.CategoryCoverCandidate
+import com.example.domain.model.FacetType
+import com.example.domain.model.LiveCatalogFacets
+import com.example.domain.model.LiveFilterState
+import com.example.domain.model.LiveTagChip
+import com.example.domain.model.SearchSuggestionType
 import com.example.service.AnimeLiveWallpaperService
 import com.example.service.DelogoEffect
 import com.example.ui.state.MainViewModel
@@ -524,5 +529,421 @@ class LiveWallpaperR2Test {
         assertEquals("+54", directDetailPreview.formatRemainingBadge())
         assertEquals(directDetailPreview.thumbnailUrls[1], directDetailPreview.wallpapers[1].thumbnailUrl)
         assertEquals("COLLECTION", com.example.ui.navigation.DetailRoute.FEED_COLLECTION)
+    }
+
+    @Test
+    fun `faceted LiveFilterState supports series, contextual tagsByCategory, combined filters, and color synonyms`() = runTest {
+        val v1Json = """
+            {
+              "version": 1,
+              "total": 4,
+              "wallpapers": [
+                {
+                  "id": "kuro_101",
+                  "slug": "raiden-shogun-dark-lightning",
+                  "title": "Raiden Shogun Storm",
+                  "category": "Games",
+                  "series": "Genshin Impact",
+                  "tags": ["dark", "amoled", "lightning", "sword"],
+                  "thumbUrl": "https://cdn.example.r2.dev/kuro_101/thumb.jpg",
+                  "previewUrl": "https://cdn.example.r2.dev/kuro_101/preview.mp4",
+                  "fullUrl": "https://cdn.example.r2.dev/kuro_101/full.mp4"
+                },
+                {
+                  "id": "kuro_102",
+                  "slug": "changli-flame-wuthering",
+                  "title": "Changli Crimson Phoenix",
+                  "category": "Games",
+                  "series": "Wuthering Waves",
+                  "tags": ["fire", "glowing", "dark"],
+                  "thumbUrl": "https://cdn.example.r2.dev/kuro_102/thumb.jpg",
+                  "previewUrl": "https://cdn.example.r2.dev/kuro_102/preview.mp4",
+                  "fullUrl": "https://cdn.example.r2.dev/kuro_102/full.mp4"
+                },
+                {
+                  "id": "kuro_103",
+                  "slug": "nissan-gtr-rain-drift",
+                  "title": "GTR Midnight Drift",
+                  "category": "Cars",
+                  "series": "Cars",
+                  "tags": ["jdm", "rain", "drift"],
+                  "thumbUrl": "https://cdn.example.r2.dev/kuro_103/thumb.jpg",
+                  "previewUrl": "https://cdn.example.r2.dev/kuro_103/preview.mp4",
+                  "fullUrl": "https://cdn.example.r2.dev/kuro_103/full.mp4"
+                },
+                {
+                  "id": "kuro_104",
+                  "slug": "berserk-guts-manga-ink",
+                  "title": "Guts Berserker Armor",
+                  "category": "Anime",
+                  "series": "Berserk",
+                  "tags": ["monochrome", "grayscale", "sword"],
+                  "thumbUrl": "https://cdn.example.r2.dev/kuro_104/thumb.jpg",
+                  "previewUrl": "https://cdn.example.r2.dev/kuro_104/preview.mp4",
+                  "fullUrl": "https://cdn.example.r2.dev/kuro_104/full.mp4"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
+        val parsed = moshi.adapter(LiveCatalogResponse::class.java).fromJson(v1Json)!!
+        val items = parsed.wallpapers.orEmpty()
+        assertEquals("Genshin Impact", items[0].series)
+        assertEquals("Genshin Impact", items[0].toAppWallpaper().animeSeries)
+
+        val fakeApi = object : LiveCatalogApi {
+            override suspend fun getLiveCatalog(): LiveCatalogResponse = parsed
+            override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = parsed
+        }
+        val downloader = LiveWallpaperDownloader(
+            storageRootDir = File(tempFolder.root, "live_repo_faceted"),
+            downloadClient = OkHttpClient(),
+        )
+        val repository = LiveWallpaperRepository(api = fakeApi, downloader = downloader)
+        repository.getLiveWallpapersPage(LiveFilterState(), page = 1).getOrThrow()
+
+        // 1. Series facet excludes junk series identical to category ("Cars" == "Cars")
+        val facets = repository.catalogFacets.value
+        assertEquals(setOf("Games", "Cars", "Anime"), facets.categories.map { it.label }.toSet())
+        assertEquals(setOf("Genshin Impact", "Wuthering Waves", "Berserk"), facets.series.map { it.label }.toSet())
+        assertFalse(facets.series.any { it.label.equals("Cars", ignoreCase = true) })
+
+        // 2. Contextual tagsByCategory scopes Row 2 tags strictly to selected category
+        val carTags = facets.tagsFor("Cars").map { it.query }.toSet()
+        assertEquals(setOf("jdm", "rain", "drift"), carTags)
+        assertFalse(carTags.contains("sword"))
+        val gameTags = facets.tagsFor("Games").map { it.query }.toSet()
+        assertTrue(gameTags.contains("dark"))
+        assertTrue(gameTags.contains("amoled"))
+        assertFalse(gameTags.contains("jdm"))
+
+        // 3. Combined Max 1 Category + Max 1 Tag selection:
+        //    Category and Tag can be active simultaneously, while tapping another Tag replaces the previous Tag.
+        val gamesOnly = LiveFilterState().toggleCategory("Games")
+        assertTrue(gamesOnly.isChipFilterActive)
+        assertEquals("Games", gamesOnly.displayInputText())
+        assertEquals(setOf("kuro_101", "kuro_102"), repository.getLiveWallpapersPage(gamesOnly).getOrThrow().items.map { it.id }.toSet())
+
+        // Tapping #dark keeps Games active so user gets Games + #dark
+        val gamesAndDark = gamesOnly.toggleTag("dark")
+        assertEquals("Games", gamesAndDark.selectedCategory)
+        assertEquals(setOf("dark"), gamesAndDark.selectedTags)
+        assertTrue(gamesAndDark.isChipFilterActive)
+        assertEquals("Games #dark", gamesAndDark.displayInputText())
+        assertEquals("Games · #dark", gamesAndDark.summaryLabel())
+        assertEquals(setOf("kuro_101", "kuro_102"), repository.getLiveWallpapersPage(gamesAndDark).getOrThrow().items.map { it.id }.toSet())
+
+        // Tapping #fire replaces #dark (strictly max 1 Tag) while preserving Category = Games
+        val gamesAndFire = gamesAndDark.toggleTag("fire")
+        assertEquals("Games", gamesAndFire.selectedCategory)
+        assertEquals(setOf("fire"), gamesAndFire.selectedTags)
+        assertEquals("Games #fire", gamesAndFire.displayInputText())
+        assertEquals("Games · #fire", gamesAndFire.summaryLabel())
+        assertEquals(listOf("kuro_102"), repository.getLiveWallpapersPage(gamesAndFire).getOrThrow().items.map { it.id })
+
+        // Re-tapping #fire clears only the Tag and keeps Category = Games
+        val backToGamesOnly = gamesAndFire.toggleTag("fire")
+        assertEquals("Games", backToGamesOnly.selectedCategory)
+        assertTrue(backToGamesOnly.selectedTags.isEmpty())
+        assertEquals("Games", backToGamesOnly.displayInputText())
+
+        // Re-tapping Games on Games + #fire clears only Category and keeps Tag = #fire
+        val fireOnly = gamesAndFire.toggleCategory("Games")
+        assertEquals(null, fireOnly.selectedCategory)
+        assertEquals(setOf("fire"), fireOnly.selectedTags)
+        assertEquals("#fire", fireOnly.displayInputText())
+
+        // Re-tapping the remaining active Tag toggles off cleanly back to All
+        val toggledOff = fireOnly.toggleTag("fire")
+        assertTrue(toggledOff.isHome)
+        assertFalse(toggledOff.isChipFilterActive)
+        assertEquals("", toggledOff.displayInputText())
+
+        // 4. Series facet, persistent displayInputText, and SearchSuggestionType.SERIES
+        val wutheringOnly = LiveFilterState(selectedSeries = "Wuthering Waves")
+        assertEquals("Wuthering Waves", wutheringOnly.displayInputText())
+        assertEquals(listOf("kuro_102"), repository.getLiveWallpapersPage(wutheringOnly).getOrThrow().items.map { it.id })
+
+        val seriesSuggestions = repository.getSearchSuggestions("wuther")
+        assertTrue(seriesSuggestions.any { it.type == SearchSuggestionType.SERIES && it.query == "Wuthering Waves" })
+
+        // 5. Color Synonym OR map: "black and white" -> monochrome/grayscale, "black" -> amoled/dark/night
+        val bwFilter = LiveFilterState(query = "black and white", isColorSearch = true)
+        assertEquals(listOf("kuro_104"), repository.getLiveWallpapersPage(bwFilter).getOrThrow().items.map { it.id })
+
+        val blackFilter = LiveFilterState(query = "black", isColorSearch = true)
+        assertEquals(
+            setOf("kuro_101", "kuro_102", "kuro_103"),
+            repository.getLiveWallpapersPage(blackFilter).getOrThrow().items.map { it.id }.toSet(),
+        )
+    }
+
+    @Test
+    fun `extractCatalogFacets eliminates duplicate overlapping tags like ninja-shinobi-naruto and rotates fresh tags on refresh`() = runTest {
+        val overlappingCatalog = buildList {
+            // 6 Naruto items all sharing #anime, #4k, #ninja, #shinobi, #naruto
+            repeat(6) { i ->
+                add(
+                    LiveWallpaperItem(
+                        id = "naruto_$i",
+                        slug = "naruto-shinobi-$i",
+                        title = "Naruto Shinobi Scene $i",
+                        category = "Anime",
+                        series = "Naruto",
+                        tags = listOf("anime", "4k", "ninja", "shinobi", "naruto"),
+                        thumbUrl = "https://cdn.example.r2.dev/naruto_$i/thumb.jpg",
+                        previewUrl = "https://cdn.example.r2.dev/naruto_$i/preview.mp4",
+                        fullUrl = "https://cdn.example.r2.dev/naruto_$i/full.mp4",
+                    ),
+                )
+            }
+            // 4 Cyberpunk items
+            repeat(4) { i ->
+                add(
+                    LiveWallpaperItem(
+                        id = "cyber_$i",
+                        slug = "cyberpunk-neon-$i",
+                        title = "Cyberpunk Neon City $i",
+                        category = "City",
+                        series = "Edgerunners",
+                        tags = listOf("city", "cyberpunk", "neon"),
+                        thumbUrl = "https://cdn.example.r2.dev/cyber_$i/thumb.jpg",
+                        previewUrl = "https://cdn.example.r2.dev/cyber_$i/preview.mp4",
+                        fullUrl = "https://cdn.example.r2.dev/cyber_$i/full.mp4",
+                    ),
+                )
+            }
+            // 3 Magic Frieren items
+            repeat(3) { i ->
+                add(
+                    LiveWallpaperItem(
+                        id = "magic_$i",
+                        slug = "frieren-magic-$i",
+                        title = "Frieren Magic Staff $i",
+                        category = "Anime",
+                        series = "Frieren",
+                        tags = listOf("anime", "magic", "moonlight"),
+                        thumbUrl = "https://cdn.example.r2.dev/magic_$i/thumb.jpg",
+                        previewUrl = "https://cdn.example.r2.dev/magic_$i/preview.mp4",
+                        fullUrl = "https://cdn.example.r2.dev/magic_$i/full.mp4",
+                    ),
+                )
+            }
+            // 3 Sword Samurai items
+            repeat(3) { i ->
+                add(
+                    LiveWallpaperItem(
+                        id = "sword_$i",
+                        slug = "samurai-katana-$i",
+                        title = "Samurai Katana Blade $i",
+                        category = "Anime",
+                        series = "Demon Slayer",
+                        tags = listOf("anime", "sword", "katana"),
+                        thumbUrl = "https://cdn.example.r2.dev/sword_$i/thumb.jpg",
+                        previewUrl = "https://cdn.example.r2.dev/sword_$i/preview.mp4",
+                        fullUrl = "https://cdn.example.r2.dev/sword_$i/full.mp4",
+                    ),
+                )
+            }
+        }
+
+        val fakeApi = object : LiveCatalogApi {
+            override suspend fun getLiveCatalog(): LiveCatalogResponse = LiveCatalogResponse(
+                version = 1,
+                total = overlappingCatalog.size,
+                wallpapers = overlappingCatalog,
+            )
+
+            override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = getLiveCatalog()
+        }
+        val downloader = LiveWallpaperDownloader(
+            storageRootDir = File(tempFolder.root, "live_repo_distinct_tags"),
+            downloadClient = OkHttpClient(),
+        )
+        val repository = LiveWallpaperRepository(api = fakeApi, downloader = downloader)
+        repository.getLiveWallpapersPage(LiveFilterState(), page = 1).getOrThrow()
+
+        val initialFacets = repository.catalogFacets.value
+        val displayQueries = initialFacets.displayTags.map { it.query.lowercase() }
+
+        // Category duplicates (#anime, #city) and boilerplate (#4k) are filtered out of displayTags
+        assertFalse(displayQueries.contains("anime"))
+        assertFalse(displayQueries.contains("city"))
+        assertFalse(displayQueries.contains("4k"))
+
+        // Only ONE of the 100%-overlapping Naruto cluster (#naruto / #ninja / #shinobi) appears in displayTags!
+        val narutoClusterShown = displayQueries.count { it in setOf("ninja", "shinobi", "naruto") }
+        assertEquals(1, narutoClusterShown)
+
+        // Distinct clusters (cyberpunk/neon, magic/moonlight, sword/katana) each appear once
+        assertEquals(1, displayQueries.count { it in setOf("cyberpunk", "neon") })
+        assertEquals(1, displayQueries.count { it in setOf("magic", "moonlight") })
+        assertEquals(1, displayQueries.count { it in setOf("sword", "katana") })
+
+        // Rotating display tags on refresh bumps tagRotationVersion and surfaces unseen tags from the clusters
+        val beforeVersion = initialFacets.tagRotationVersion
+        val beforeSet = displayQueries.toSet()
+        repository.rotateDisplayTags()
+        val rotatedFacets = repository.catalogFacets.value
+        val rotatedQueries = rotatedFacets.displayTags.map { it.query.lowercase() }
+
+        assertEquals(beforeVersion + 1, rotatedFacets.tagRotationVersion)
+        assertTrue("Expected rotated tags ($rotatedQueries) to differ from initial ($beforeSet)", rotatedQueries.toSet() != beforeSet)
+        // Even after rotation, overlapping tags are NEVER shown side by side
+        assertEquals(1, rotatedQueries.count { it in setOf("ninja", "shinobi", "naruto") })
+    }
+
+    @Test
+    fun `rotateContentAndTags shuffles live videos immediately and throttles CDN refreshes within 60s`() = runTest {
+        var nowMs = 1_000_000L
+        var apiCalls = 0
+        val sampleItems = (1..24).map { idx ->
+            val id = "live_${idx.toString().padStart(3, '0')}"
+            LiveWallpaperItem(
+                id = id,
+                title = "Live Video $idx",
+                category = if (idx % 2 == 0) "Anime" else "Games",
+                tags = listOf("tag_$idx", "theme_${idx % 6}"),
+                thumbUrl = "https://cdn.example.r2.dev/$id/thumb.jpg",
+                previewUrl = "https://cdn.example.r2.dev/$id/preview.mp4",
+                fullUrl = "https://cdn.example.r2.dev/$id/full.mp4",
+            )
+        }
+        val fakeApi = object : LiveCatalogApi {
+            override suspend fun getLiveCatalog(): LiveCatalogResponse {
+                apiCalls++
+                return LiveCatalogResponse(version = 1, total = sampleItems.size, wallpapers = sampleItems)
+            }
+
+            override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = getLiveCatalog()
+        }
+        val downloader = LiveWallpaperDownloader(
+            storageRootDir = File(tempFolder.root, "live_repo_refresh_shuffle"),
+            downloadClient = OkHttpClient(),
+        )
+        val repository = LiveWallpaperRepository(
+            api = fakeApi,
+            downloader = downloader,
+            clock = { nowMs },
+        )
+
+        val initialIds = repository.getLiveWallpapersPage(LiveFilterState(), page = 1, pageSize = 12)
+            .getOrThrow().items.map { it.id }
+        assertEquals(1, apiCalls)
+
+        // Rapid pull-to-refresh 5 seconds later: 0 CDN calls, brand-new video order, duplicate-free pagination
+        nowMs += 5_000L
+        repository.rotateContentAndTags()
+        val refreshedPage1 = repository.getLiveWallpapersPage(
+            LiveFilterState(),
+            page = 1,
+            pageSize = 12,
+            forceRefresh = true,
+        ).getOrThrow().items.map { it.id }
+        val refreshedPage2 = repository.getLiveWallpapersPage(
+            LiveFilterState(),
+            page = 2,
+            pageSize = 12,
+            forceRefresh = false,
+        ).getOrThrow().items.map { it.id }
+
+        assertEquals(1, apiCalls)
+        assertTrue("Expected refreshed video order to differ from initial", refreshedPage1 != initialIds)
+        assertEquals(24, (refreshedPage1 + refreshedPage2).distinct().size)
+
+        // After 61 seconds, forceRefresh is allowed to re-fetch the CDN catalog once
+        nowMs += LiveWallpaperRepository.LIVE_CATALOG_REFRESH_COOLDOWN_MS + 1_000L
+        repository.rotateContentAndTags()
+        repository.getLiveWallpapersPage(LiveFilterState(), page = 1, pageSize = 12, forceRefresh = true).getOrThrow()
+        assertEquals(2, apiCalls)
+    }
+
+    @Test
+    fun `CrossTabSearchSync keeps Live and 4K Artworks synchronized and displayTagsFor never leaks zero-match tags`() {
+        // 1. Selecting Popular Series "One Piece" from SearchScreen syncs BOTH Live & Static filters
+        val seriesSynced = com.example.domain.model.CrossTabSearchSync.syncFromSearch(
+            rawQuery = "One Piece",
+            facetType = FacetType.SERIES,
+        )
+        assertEquals("One Piece", seriesSynced.liveFilter.selectedSeries)
+        assertEquals("One Piece", seriesSynced.staticFilter.searchQuery)
+        assertEquals("One Piece", seriesSynced.activeQueryForLive)
+        assertEquals("One Piece", seriesSynced.activeQueryForStatic)
+
+        // Switching from Live -> 4K Artworks even if an old static filter existed must sync to "One Piece"
+        val switchedToStatic = com.example.domain.model.CrossTabSearchSync.syncOnTabSwitch(
+            targetIsLive = false,
+            currentLiveFilter = seriesSynced.liveFilter,
+            currentStaticFilter = com.example.domain.model.StaticFilterState(searchQuery = "Jujutsu Kaisen"),
+            searchInput = "One Piece",
+        )
+        assertEquals("One Piece", switchedToStatic.staticFilter.searchQuery)
+        assertEquals("One Piece", switchedToStatic.activeQueryForStatic)
+
+        // 2. Selecting Trending Color syncs both tabs (with isColorSearch preserved for Live)
+        val colorSynced = com.example.domain.model.CrossTabSearchSync.syncFromSearch(
+            rawQuery = "black and white",
+            isColorSearch = true,
+        )
+        assertTrue(colorSynced.liveFilter.isColorSearch)
+        assertEquals("black and white", colorSynced.liveFilter.query)
+        assertEquals("black and white", colorSynced.staticFilter.searchQuery)
+
+        // Switching from 4K Artworks -> Live preserves color search even if Live had stale filter
+        val switchedToLive = com.example.domain.model.CrossTabSearchSync.syncOnTabSwitch(
+            targetIsLive = true,
+            currentLiveFilter = LiveFilterState(selectedSeries = "Naruto"),
+            currentStaticFilter = colorSynced.staticFilter,
+            searchInput = "black and white",
+            isColorSearch = true,
+        )
+        assertTrue(switchedToLive.liveFilter.isColorSearch)
+        assertEquals("black and white", switchedToLive.liveFilter.query)
+
+        // 3. Selecting Popular #Tag syncs both tabs
+        val tagSynced = com.example.domain.model.CrossTabSearchSync.syncFromSearch(
+            rawQuery = "katana",
+            facetType = FacetType.TAG,
+        )
+        assertEquals(setOf("katana"), tagSynced.liveFilter.selectedTags)
+        assertEquals("katana", tagSynced.staticFilter.selectedTag)
+
+        // 4. Selecting Trending Category syncs both tabs
+        val catSynced = com.example.domain.model.CrossTabSearchSync.syncFromSearch(
+            rawQuery = "Games",
+            facetType = FacetType.CATEGORY,
+            matchedExploreCategoryTitle = "Games",
+        )
+        assertEquals("Games", catSynced.liveFilter.selectedCategory)
+        assertEquals("Games", catSynced.staticFilter.selectedCategory)
+
+        // 5. LiveCatalogFacets.displayTagsFor never leaks global tags into a category with no matching tags
+        val facets = LiveCatalogFacets(
+            categories = listOf(
+                LiveTagChip("Anime", "Anime", count = 10, type = FacetType.CATEGORY),
+                LiveTagChip("Cars", "Cars", count = 1, type = FacetType.CATEGORY),
+            ),
+            tags = listOf(
+                LiveTagChip("#naruto", "naruto", count = 8, type = FacetType.TAG),
+                LiveTagChip("#emptytag", "emptytag", count = 0, type = FacetType.TAG),
+            ),
+            displayTags = listOf(
+                LiveTagChip("#naruto", "naruto", count = 8, type = FacetType.TAG),
+                LiveTagChip("#emptytag", "emptytag", count = 0, type = FacetType.TAG),
+            ),
+            tagsByCategory = mapOf(
+                "anime" to listOf(LiveTagChip("#naruto", "naruto", count = 8, type = FacetType.TAG)),
+            ),
+            displayTagsByCategory = mapOf(
+                "anime" to listOf(LiveTagChip("#naruto", "naruto", count = 8, type = FacetType.TAG)),
+            ),
+            totalWallpapers = 11,
+        )
+        assertEquals(listOf("naruto"), facets.displayTagsFor(null).map { it.query })
+        assertTrue(
+            "Category with no scoped tags must not leak unrelated global tags",
+            facets.displayTagsFor("Cars").isEmpty(),
+        )
     }
 }

@@ -23,6 +23,7 @@ import com.example.data.remote.WallhavenService
 import com.example.data.remote.WallhavenThumbs
 import com.example.data.repository.LiveWallpaperRepository
 import com.example.data.repository.WallpaperRepository
+import com.example.domain.model.RatioFilter
 import com.example.domain.model.ResolutionTier
 import com.example.domain.model.SortOption
 import com.example.domain.model.WallpaperFilter
@@ -682,5 +683,635 @@ class WallpaperRepositoryTest {
         assertTrue(page2.wallpapers.isEmpty())
         assertFalse(page2.hasMore)
         assertNull(page2.warningMessage)
+    }
+
+    @Test
+    fun `pull-to-refresh rotates static artworks and enforces 45 req per minute guard under rapid refreshes`() = runTest {
+        var nowMs = 5_000_000L
+        val wallhavenCalls = AtomicInteger(0)
+
+        val fakeWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                val callNum = wallhavenCalls.incrementAndGet()
+                val safeKey = (query ?: "top").replace(Regex("[^a-zA-Z0-9]"), "")
+                val items = (1..8).map { idx ->
+                    WallhavenItem(
+                        id = "${safeKey}_p${page}_c${callNum}_$idx",
+                        path = "https://w.wallhaven.cc/full/01/${safeKey}_p${page}_$idx.jpg",
+                        dimensionX = 2160,
+                        dimensionY = 3840,
+                        thumbs = WallhavenThumbs(
+                            large = "https://th.wallhaven.cc/lg/01/${safeKey}_p${page}_$idx.jpg",
+                            original = "https://th.wallhaven.cc/orig/01/${safeKey}_p${page}_$idx.jpg",
+                        ),
+                    )
+                }
+                return Response.success(WallhavenResponse(data = items))
+            }
+        }
+        val emptyReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.success(RedditResponse())
+        }
+
+        val limiter = com.example.data.remote.WallhavenRateLimiter(
+            minSpacingMillis = 0L,
+            clock = { nowMs },
+        )
+        val repo = WallpaperRepository(
+            wallhavenApi = fakeWallhaven,
+            redditApi = emptyReddit,
+            wallpaperDao = FakeWallpaperDao(),
+            wallhavenRateLimiter = limiter,
+            clock = { nowMs },
+        )
+
+        // 1. Initial Home Trending load (3 calls)
+        val initial = repo.getWallpapers(
+            query = WallpaperRepository.HOME_TRENDING_KEY,
+            isLive = false,
+            filter = WallpaperFilter(),
+            page = 1,
+            forceRefresh = false,
+        )
+        assertEquals(3, wallhavenCalls.get())
+        val initialIds = initial.wallpapers.map { it.id }
+        assertTrue(initialIds.isNotEmpty())
+
+        // 2. First pull-to-refresh rotates to a fresh trending batch with at most 2 Wallhaven calls
+        nowMs += 2_000L
+        val firstRefresh = repo.getWallpapers(
+            query = WallpaperRepository.HOME_TRENDING_KEY,
+            isLive = false,
+            filter = WallpaperFilter(),
+            page = 1,
+            forceRefresh = true,
+        )
+        val callsAfterFirstRefresh = wallhavenCalls.get()
+        assertEquals(5, callsAfterFirstRefresh)
+        assertTrue(firstRefresh.wallpapers.map { it.id } != initialIds)
+
+        // 3. Rapid spam pull-to-refresh 10 times within 10 seconds -> 0 extra Wallhaven calls, fresh shuffled cache!
+        var lastIds = firstRefresh.wallpapers.map { it.id }
+        var orderChangedCount = 0
+        repeat(10) {
+            nowMs += 1_000L
+            val rapidRefresh = repo.getWallpapers(
+                query = WallpaperRepository.HOME_TRENDING_KEY,
+                isLive = false,
+                filter = WallpaperFilter(),
+                page = 1,
+                forceRefresh = true,
+            )
+            assertTrue(rapidRefresh.isFromCache)
+            assertTrue(rapidRefresh.wallpapers.isNotEmpty())
+            val nextIds = rapidRefresh.wallpapers.map { it.id }
+            if (nextIds != lastIds) orderChangedCount++
+            lastIds = nextIds
+        }
+        assertEquals(callsAfterFirstRefresh, wallhavenCalls.get())
+        assertTrue("Expected rapid refreshes to shuffle visible artworks", orderChangedCount >= 8)
+
+        // 4. Even across a full 60-second window with repeated refreshes every 16 seconds,
+        //    total Wallhaven calls remain strictly capped well below 45 req/min!
+        repeat(4) {
+            nowMs += 16_000L
+            val periodicRefresh = repo.getWallpapers(
+                query = WallpaperRepository.HOME_TRENDING_KEY,
+                isLive = false,
+                filter = WallpaperFilter(),
+                page = 1,
+                forceRefresh = true,
+            )
+            assertTrue(periodicRefresh.wallpapers.isNotEmpty())
+        }
+        assertTrue(
+            "Total Wallhaven calls (${wallhavenCalls.get()}) must stay well below 45 req/min",
+            wallhavenCalls.get() <= 13,
+        )
+    }
+
+    @Test
+    fun `wallhaven 200 with zero matches plus reddit 403 does not trigger false server unreachable error`() = runTest {
+        val capturedAtleastList = mutableListOf<String?>()
+        val capturedRatiosList = mutableListOf<String?>()
+        val emptyWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                capturedAtleastList.add(atleast)
+                capturedRatiosList.add(ratios)
+                return Response.success(WallhavenResponse(data = emptyList()))
+            }
+        }
+        val forbiddenReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.error(403, "Forbidden".toResponseBody())
+        }
+
+        val repo = WallpaperRepository(
+            wallhavenApi = emptyWallhaven,
+            redditApi = forbiddenReddit,
+            wallpaperDao = FakeWallpaperDao(),
+            wallhavenRateLimiter = com.example.data.remote.WallhavenRateLimiter(minSpacingMillis = 0L),
+        )
+
+        val resultAllRatio2K = repo.getWallpapers(
+            query = "ObscureAnimeQuery",
+            isLive = false,
+            filter = WallpaperFilter(resolution = ResolutionTier.QHD_2K, ratio = RatioFilter.ALL),
+        )
+        assertEquals(listOf("1440x1440"), capturedAtleastList)
+        assertEquals(listOf<String?>(null), capturedRatiosList)
+        assertTrue(resultAllRatio2K.wallpapers.isEmpty())
+        assertNull(
+            "Expected clean empty result without false 'Unable to reach wallpaper servers' banner",
+            resultAllRatio2K.warningMessage,
+        )
+
+        capturedAtleastList.clear()
+        capturedRatiosList.clear()
+
+        repo.getWallpapers(
+            query = "ObscureAnimeQuery2",
+            isLive = false,
+            filter = WallpaperFilter(resolution = ResolutionTier.UHD_4K, ratio = RatioFilter.PORTRAIT_MOBILE),
+        )
+        assertEquals("2160x3840", capturedAtleastList.first())
+        assertEquals(
+            listOf(RatioFilter.MOBILE_PORTRAIT_RATIOS, RatioFilter.FALLBACK_PORTRAIT_RATIO),
+            capturedRatiosList,
+        )
+    }
+
+    @Test
+    fun `mobile optimization sends portrait ratios, filters oversized raw files, and caps static pages to 18`() = runTest {
+        var capturedRatios: String? = null
+        val oversizedBytes = 12L * 1024L * 1024L
+        val normalBytes = 1_600_000L
+
+        val fakeWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                capturedRatios = ratios
+                val oversizedDesktop8K = WallhavenItem(
+                    id = "heavy8k",
+                    path = "https://w.wallhaven.cc/full/01/heavy8k.png",
+                    dimensionX = 7680,
+                    dimensionY = 4320,
+                    fileSize = oversizedBytes,
+                    thumbs = WallhavenThumbs(original = "https://th.wallhaven.cc/orig/01/heavy8k.jpg"),
+                )
+                val mobilePortraitItems = (1..22).map { idx ->
+                    WallhavenItem(
+                        id = "mob_$idx",
+                        path = "https://w.wallhaven.cc/full/01/mob_$idx.jpg",
+                        dimensionX = 1080,
+                        dimensionY = 2400,
+                        fileSize = normalBytes,
+                        thumbs = WallhavenThumbs(
+                            large = "https://th.wallhaven.cc/lg/01/mob_$idx.jpg",
+                            original = "https://th.wallhaven.cc/orig/01/mob_$idx.jpg",
+                        ),
+                    )
+                }
+                return Response.success(
+                    WallhavenResponse(data = listOf(oversizedDesktop8K) + mobilePortraitItems),
+                )
+            }
+        }
+        val emptyReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.success(RedditResponse())
+        }
+
+        val repo = WallpaperRepository(
+            wallhavenApi = fakeWallhaven,
+            redditApi = emptyReddit,
+            wallpaperDao = FakeWallpaperDao(),
+            wallhavenRateLimiter = com.example.data.remote.WallhavenRateLimiter(minSpacingMillis = 0L),
+        )
+
+        val result = repo.getWallpapers(
+            query = "Solo Leveling",
+            isLive = false,
+            filter = WallpaperFilter(),
+            page = 1,
+        )
+
+        assertEquals("9x16,10x16,9x18,18x39,9x20,9x21", capturedRatios)
+        assertEquals(WallpaperRepository.STATIC_PAGE_SIZE, result.wallpapers.size)
+        assertTrue(
+            "Oversized 8K raw file (>8MB) must be filtered out when browsing default mobile feed",
+            result.wallpapers.none { it.id == "wh_heavy8k" },
+        )
+        assertTrue(
+            "Grid thumbnails must stay lightweight Wallhaven thumb URLs",
+            result.wallpapers.all { it.thumbnailUrl.startsWith("https://th.wallhaven.cc/") },
+        )
+    }
+
+    @Test
+    fun `bitmap cropper calculateInSampleSize downsamples 4K and 8K sources safely for mobile screens`() {
+        // 8K vertical artwork (4320x7680) targeting 1080x2400 phone display -> power-of-2 sample size 2
+        val sample8K = com.example.util.BitmapCropper.calculateInSampleSize(
+            srcWidth = 4320,
+            srcHeight = 7680,
+            reqWidth = 1080,
+            reqHeight = 2400,
+        )
+        assertEquals(2, sample8K)
+
+        // Exact FHD+ source (1080x2400) targeting 1080x2400 -> no downsampling needed (1)
+        val sampleExact = com.example.util.BitmapCropper.calculateInSampleSize(
+            srcWidth = 1080,
+            srcHeight = 2400,
+            reqWidth = 1080,
+            reqHeight = 2400,
+        )
+        assertEquals(1, sampleExact)
+
+        // Ultra-massive 16K image -> sample size >= 4
+        val sample16K = com.example.util.BitmapCropper.calculateInSampleSize(
+            srcWidth = 8640,
+            srcHeight = 15360,
+            reqWidth = 1080,
+            reqHeight = 2400,
+        )
+        assertTrue("Expected inSampleSize >= 4 for 16K image, got $sample16K", sample16K >= 4)
+    }
+
+    @Test
+    fun `home trending prefers uncropped wallhaven thumbs original and suppresses partial failure banner`() = runTest {
+        val fakeWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                if (query?.contains("JoJo", ignoreCase = true) == true) {
+                    return Response.error(503, "Temporary topic failure".toResponseBody())
+                }
+                val safeId = (query ?: "top").replace(Regex("[^a-zA-Z0-9]"), "")
+                return Response.success(
+                    WallhavenResponse(
+                        data = listOf(
+                            WallhavenItem(
+                                id = safeId,
+                                path = "https://w.wallhaven.cc/full/01/$safeId.jpg",
+                                dimensionX = 2160,
+                                dimensionY = 3840,
+                                thumbs = WallhavenThumbs(
+                                    large = "https://th.wallhaven.cc/lg/01/$safeId.jpg",
+                                    original = "https://th.wallhaven.cc/orig/01/$safeId.jpg",
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+        val forbiddenReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.error(403, "Forbidden".toResponseBody())
+        }
+
+        val repo = WallpaperRepository(
+            wallhavenApi = fakeWallhaven,
+            redditApi = forbiddenReddit,
+            wallpaperDao = FakeWallpaperDao(),
+            wallhavenRateLimiter = com.example.data.remote.WallhavenRateLimiter(minSpacingMillis = 0L),
+        )
+
+        val result = repo.getWallpapers(
+            query = WallpaperRepository.HOME_TRENDING_KEY,
+            isLive = false,
+            filter = WallpaperFilter(),
+            page = 1,
+        )
+        assertEquals(2, result.wallpapers.size)
+        assertNull(
+            "Partial topic failure must not display an error banner when other topics populated the feed",
+            result.warningMessage,
+        )
+        assertTrue(
+            "Wallhaven thumbnail must prefer uncropped thumbs.original over 3:2 cropped thumbs.large",
+            result.wallpapers.all { it.thumbnailUrl.contains("/orig/") },
+        )
+    }
+
+    @Test
+    fun `static filter combines max 1 category and max 1 tag and sends combined API parameters`() = runTest {
+        val initial = com.example.domain.model.StaticFilterState()
+        assertTrue(initial.isHome)
+        assertFalse(initial.isChipFilterActive)
+
+        val animeOnly = initial.toggleCategory("Anime")
+        assertEquals("Anime", animeOnly.selectedCategory)
+        assertNull(animeOnly.selectedTag)
+        assertTrue(animeOnly.isChipFilterActive)
+        assertFalse(animeOnly.isSearchQueryOnly)
+
+        // Combining Category + Tag keeps Anime and adds #Kawaii
+        val animeKawaii = animeOnly.toggleTag("Kawaii")
+        assertEquals("Anime", animeKawaii.selectedCategory)
+        assertEquals("Kawaii", animeKawaii.selectedTag)
+        assertTrue(animeKawaii.isChipFilterActive)
+        assertEquals("Anime · #Kawaii", animeKawaii.summaryLabel())
+
+        // Tapping another Tag replaces Kawaii while keeping Anime (strictly max 1 Tag)
+        val animeCyberpunk = animeKawaii.toggleTag("Cyberpunk")
+        assertEquals("Anime", animeCyberpunk.selectedCategory)
+        assertEquals("Cyberpunk", animeCyberpunk.selectedTag)
+
+        // Switching Category to Cars clears Anime-specific tag
+        val carsOnly = animeCyberpunk.toggleCategory("Cars")
+        assertEquals("Cars", carsOnly.selectedCategory)
+        assertNull(carsOnly.selectedTag)
+
+        // Verify Wallhaven API receives both category bitmask and combined tag query
+        val capturedCalls = mutableListOf<Pair<String, String?>>()
+        val fakeWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                capturedCalls.add(categories to query)
+                return Response.success(
+                    WallhavenResponse(
+                        data = listOf(
+                            WallhavenItem(
+                                id = "comb_${capturedCalls.size}",
+                                path = "https://w.wallhaven.cc/full/01/comb_${capturedCalls.size}.jpg",
+                                dimensionX = 1080,
+                                dimensionY = 2400,
+                                thumbs = WallhavenThumbs(original = "https://th.wallhaven.cc/orig/01/comb_${capturedCalls.size}.jpg"),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+        val emptyReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.success(RedditResponse())
+        }
+        val repo = WallpaperRepository(
+            wallhavenApi = fakeWallhaven,
+            redditApi = emptyReddit,
+            wallpaperDao = FakeWallpaperDao(),
+            wallhavenRateLimiter = com.example.data.remote.WallhavenRateLimiter(minSpacingMillis = 0L),
+        )
+
+        repo.getWallpapers(
+            query = animeKawaii.toQueryKey(),
+            isLive = false,
+            filter = WallpaperFilter(),
+            staticFilter = animeKawaii,
+        )
+        val carsJdm = carsOnly.toggleTag("JDM")
+        repo.getWallpapers(
+            query = carsJdm.toQueryKey(),
+            isLive = false,
+            filter = WallpaperFilter(),
+            staticFilter = carsJdm,
+        )
+
+        assertEquals("010" to "Kawaii", capturedCalls[0])
+        assertEquals("100" to "car JDM", capturedCalls[1])
+    }
+
+    @Test
+    fun `probeExploreCategoryStaticCovers detects confirmed empty categories and contextual static tags vary by category`() = runTest {
+        val fakeWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                // Simulate "Cute" returning 0 items (HTTP 200) while "Anime" returns items
+                if (query?.contains("cute", ignoreCase = true) == true) {
+                    return Response.success(WallhavenResponse(data = emptyList()))
+                }
+                return Response.success(
+                    WallhavenResponse(
+                        data = listOf(
+                            WallhavenItem(
+                                id = "cat_ok",
+                                path = "https://w.wallhaven.cc/full/01/cat_ok.jpg",
+                                dimensionX = 1080,
+                                dimensionY = 2400,
+                                thumbs = WallhavenThumbs(original = "https://th.wallhaven.cc/orig/01/cat_ok.jpg"),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+        val emptyReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.success(RedditResponse())
+        }
+        val repo = WallpaperRepository(
+            wallhavenApi = fakeWallhaven,
+            redditApi = emptyReddit,
+            wallpaperDao = FakeWallpaperDao(),
+            wallhavenRateLimiter = com.example.data.remote.WallhavenRateLimiter(minSpacingMillis = 0L),
+        )
+
+        val cuteTopic = com.example.domain.model.AnimeCatalog.exploreCategories.first { it.title == "Cute" }
+        val animeTopic = com.example.domain.model.AnimeCatalog.exploreCategories.first { it.title == "Anime" }
+
+        val cuteProbe = repo.probeExploreCategoryStaticCovers(cuteTopic)
+        assertTrue("Empty category from HTTP 200 API response must be flagged confirmedEmpty", cuteProbe.confirmedEmpty)
+        assertTrue(cuteProbe.coverUrls.isEmpty())
+
+        val animeProbe = repo.probeExploreCategoryStaticCovers(animeTopic)
+        assertFalse(animeProbe.confirmedEmpty)
+        assertEquals(1, animeProbe.coverUrls.size)
+        // Cached lookup immediately hits the probed category covers without extra API calls
+        assertEquals(animeProbe.coverUrls, repo.getCachedExploreCategoryStaticCovers(animeTopic))
+
+        // Dynamic contextual tag suggestions per Category
+        val animeTags = com.example.ui.components.getRotatedStaticTags(selectedCategory = "Anime").map { it.query }.toSet()
+        val gamesTags = com.example.ui.components.getRotatedStaticTags(selectedCategory = "Games").map { it.query }.toSet()
+        val carsTags = com.example.ui.components.getRotatedStaticTags(selectedCategory = "Cars").map { it.query }.toSet()
+        val natureTags = com.example.ui.components.getRotatedStaticTags(selectedCategory = "Nature").map { it.query }.toSet()
+
+        assertTrue(animeTags.contains("Kawaii"))
+        assertTrue(gamesTags.contains("RPG"))
+        assertTrue(gamesTags.contains("Knight"))
+        assertTrue(carsTags.contains("JDM"))
+        assertTrue(natureTags.contains("Sunset"))
+        assertFalse(carsTags.contains("Kawaii"))
+        assertFalse(natureTags.contains("JDM"))
+    }
+
+    @Test
+    fun `probeStaticTagAvailability filters out confirmed empty hashtags like Aesthetic and caches verified tags`() = runTest {
+        val apiCalls = AtomicInteger(0)
+        val fakeWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                apiCalls.incrementAndGet()
+                // Simulate #Aesthetic returning 0 items (HTTP 200) while #Cyberpunk returns 42 matches
+                if (query.equals("Aesthetic", ignoreCase = true)) {
+                    return Response.success(
+                        WallhavenResponse(
+                            data = emptyList(),
+                            meta = com.example.data.remote.WallhavenMeta(total = 0),
+                        ),
+                    )
+                }
+                return Response.success(
+                    WallhavenResponse(
+                        data = listOf(
+                            WallhavenItem(
+                                id = "cyber_1",
+                                path = "https://w.wallhaven.cc/full/01/cyber_1.jpg",
+                                dimensionX = 1080,
+                                dimensionY = 2400,
+                                thumbs = WallhavenThumbs(original = "https://th.wallhaven.cc/orig/01/cyber_1.jpg"),
+                            ),
+                        ),
+                        meta = com.example.data.remote.WallhavenMeta(total = 42),
+                    ),
+                )
+            }
+        }
+        val emptyReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.success(RedditResponse())
+        }
+        val repo = WallpaperRepository(
+            wallhavenApi = fakeWallhaven,
+            redditApi = emptyReddit,
+            wallpaperDao = FakeWallpaperDao(),
+            wallhavenRateLimiter = com.example.data.remote.WallhavenRateLimiter(minSpacingMillis = 0L),
+        )
+
+        val aestheticProbe = repo.probeStaticTagAvailability(tag = "Aesthetic", selectedCategory = null)
+        assertTrue("Empty tag must be flagged confirmedEmpty", aestheticProbe.confirmedEmpty)
+        assertEquals(0, aestheticProbe.matchCount)
+
+        val cyberpunkProbe = repo.probeStaticTagAvailability(tag = "Cyberpunk", selectedCategory = null)
+        assertFalse(cyberpunkProbe.confirmedEmpty)
+        assertEquals(42, cyberpunkProbe.matchCount)
+        val callsAfterProbe = apiCalls.get()
+
+        // Subsequent cache lookup & probe hit Room with 0 extra network calls
+        assertEquals(42, repo.getCachedStaticTagCount(tag = "Cyberpunk", selectedCategory = null))
+        val cachedProbe = repo.probeStaticTagAvailability(tag = "Cyberpunk", selectedCategory = null)
+        assertEquals(42, cachedProbe.matchCount)
+        assertEquals(callsAfterProbe, apiCalls.get())
+
+        // Rotating verified tags only cycles through verified chips
+        val verified = listOf(
+            com.example.domain.model.LiveTagChip("#Cyberpunk", "Cyberpunk", count = 42),
+            com.example.domain.model.LiveTagChip("#Dark", "Dark", count = 18),
+            com.example.domain.model.LiveTagChip("#Samurai", "Samurai", count = 25),
+            com.example.domain.model.LiveTagChip("#Sakura", "Sakura", count = 31),
+        )
+        val rotated0 = com.example.ui.components.rotateVerifiedTagChips(verified, rotationSeed = 0)
+        val rotated1 = com.example.ui.components.rotateVerifiedTagChips(verified, rotationSeed = 1)
+        assertEquals(listOf("Cyberpunk", "Dark", "Samurai", "Sakura"), rotated0.map { it.query })
+        assertEquals(listOf("Sakura", "Cyberpunk", "Dark", "Samurai"), rotated1.map { it.query })
     }
 }

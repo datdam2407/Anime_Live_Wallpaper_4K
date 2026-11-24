@@ -203,9 +203,10 @@ fun FavoritesScreen(
                         items = filtered,
                         key = { _, item -> item.id },
                     ) { filteredIndex, wallpaper ->
+                        val uniformRatio = if (selectedTab == FavoriteTab.LIVE) 0.58f else 0.66f
                         WallpaperStaggeredCard(
                             wallpaper = wallpaper,
-                            staggeredRatio = wallpaper.aspectRatio,
+                            staggeredRatio = uniformRatio,
                             onClick = { onOpenDetail(filteredIndex, selectedTab.feedSource) },
                             onToggleFavorite = { onToggleFavorite(wallpaper) },
                         )

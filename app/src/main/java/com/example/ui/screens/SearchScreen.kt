@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.DirectionsCar
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Landscape
 import androidx.compose.material.icons.rounded.LocalCafe
+import androidx.compose.material.icons.rounded.LocalMovies
 import androidx.compose.material.icons.rounded.LocationCity
 import androidx.compose.material.icons.rounded.MenuBook
 import androidx.compose.material.icons.rounded.Movie
@@ -98,13 +99,16 @@ import com.example.ads.NativeAdStyle
 import com.example.domain.model.AnimeCatalog
 import com.example.domain.model.AppWallpaper
 import com.example.domain.model.CategoryCoverCandidate
+import com.example.domain.model.FacetType
 import com.example.domain.model.LiveCatalogFacets
 import com.example.domain.model.LiveSearchSuggestion
 import com.example.domain.model.LiveTagChip
+import com.example.domain.model.SearchSuggestionType
 import com.example.ui.components.CURATED_STATIC_TAGS
 import com.example.ui.components.SearchSuggestionStrip
 import com.example.ui.theme.CrimsonBlade
 import com.example.ui.theme.CyberCyan
+import com.example.ui.theme.ElectricViolet
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.InkMuted
 import com.example.ui.theme.InkSubtle
@@ -114,7 +118,11 @@ import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.PremiumGold
 import com.kuroanimelivewallpapers.app.R
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+
+private val NON_ALNUM_REGEX = Regex("[^a-z0-9]+")
 
 @Immutable
 data class TrendingColorOption(
@@ -341,10 +349,11 @@ private val EXPLORE_CATEGORY_VISUALS: Map<String, TrendingCategoryVisualStyle> =
 @Composable
 fun SearchScreen(
     liveFacets: LiveCatalogFacets,
+    verifiedStaticTags: List<LiveTagChip> = emptyList(),
     trendingBanners: List<AppWallpaper>,
     categoryCovers: Map<String, CategoryCoverCandidate>,
     onComputeSuggestions: (String) -> List<LiveSearchSuggestion>,
-    onSearchSubmit: (query: String, isColorSearch: Boolean, preferLive: Boolean?) -> Unit,
+    onSearchSubmit: (query: String, isColorSearch: Boolean, preferLive: Boolean?, facetType: FacetType?) -> Unit,
     onScreenEntered: () -> Unit = {},
     scrollToTopTick: Int = 0,
     nativeAdManager: NativeAdManager? = null,
@@ -355,8 +364,19 @@ fun SearchScreen(
     val gridState = rememberLazyGridState()
     var lastHandledScrollTick by rememberSaveable { mutableIntStateOf(scrollToTopTick) }
     var query by rememberSaveable { mutableStateOf("") }
-    val suggestions = remember(query, liveFacets) {
-        if (query.isBlank()) emptyList() else onComputeSuggestions(query)
+    var suggestions by remember { mutableStateOf<List<LiveSearchSuggestion>>(emptyList()) }
+
+    LaunchedEffect(query, liveFacets) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) {
+            suggestions = emptyList()
+            return@LaunchedEffect
+        }
+        delay(120L)
+        suggestions = withContext(Dispatchers.Default) {
+            onComputeSuggestions(trimmed)
+                .distinctBy { "${it.type.name}:${it.query.lowercase()}" }
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -407,12 +427,17 @@ fun SearchScreen(
         )
     }
 
-    val popularTags = remember(liveFacets.tags) {
-        if (liveFacets.tags.isNotEmpty()) {
-            liveFacets.tags
-        } else {
-            CURATED_STATIC_TAGS
-        }
+    val popularTags = remember(liveFacets.displayTags, liveFacets.tags, verifiedStaticTags) {
+        val verifiedLive = liveFacets.displayTags.filter { it.count > 0 }
+            .ifEmpty { liveFacets.tags.filter { it.count > 0 } }
+        val raw = verifiedLive.ifEmpty { verifiedStaticTags.filter { it.count > 0 } }
+        raw.distinctBy { it.query.lowercase() }
+    }
+
+    val popularSeries = remember(liveFacets.series) {
+        liveFacets.series
+            .filter { it.count > 0 }
+            .distinctBy { it.query.lowercase() }
     }
 
     BoxWithConstraints(
@@ -435,7 +460,7 @@ fun SearchScreen(
                     val trimmed = query.trim()
                     if (trimmed.isNotEmpty()) {
                         focusManager.clearFocus()
-                        onSearchSubmit(trimmed, false, null)
+                        onSearchSubmit(trimmed, false, null, null)
                     }
                 },
                 onClear = { query = "" },
@@ -446,8 +471,14 @@ fun SearchScreen(
                 suggestions = suggestions,
                 onSelectSuggestion = { suggestion ->
                     focusManager.clearFocus()
-                    query = suggestion.label
-                    onSearchSubmit(suggestion.label, false, null)
+                    query = suggestion.query
+                    val facetType = when (suggestion.type) {
+                        SearchSuggestionType.CATEGORY -> FacetType.CATEGORY
+                        SearchSuggestionType.SERIES -> FacetType.SERIES
+                        SearchSuggestionType.TAG -> FacetType.TAG
+                        SearchSuggestionType.TITLE -> null
+                    }
+                    onSearchSubmit(suggestion.query, false, null, facetType)
                 },
             )
 
@@ -477,7 +508,7 @@ fun SearchScreen(
                         TrendingColorPaletteRows(
                             onColorSelected = { colorOption ->
                                 focusManager.clearFocus()
-                                onSearchSubmit(colorOption.query, true, null)
+                                onSearchSubmit(colorOption.query, true, null, null)
                             },
                         )
                     }
@@ -547,7 +578,61 @@ fun SearchScreen(
                                         chip = tag,
                                         onClick = {
                                             focusManager.clearFocus()
-                                            onSearchSubmit(tag.label, false, if (liveFacets.tags.isNotEmpty()) true else null)
+                                            onSearchSubmit(
+                                                tag.query,
+                                                false,
+                                                if (liveFacets.tags.isNotEmpty()) true else null,
+                                                FacetType.TAG,
+                                            )
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Section 2B: Popular Series from live_wallpapers_v1.json (above Trending Categories)
+                if (popularSeries.isNotEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "section_popular_series") {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Rounded.LocalMovies,
+                                    contentDescription = null,
+                                    tint = ElectricViolet,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = stringResource(id = R.string.search_popular_series),
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        fontSize = 17.sp,
+                                        fontWeight = FontWeight.Bold,
+                                    ),
+                                    color = InkWhite,
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("search_popular_series_row"),
+                            ) {
+                                items(
+                                    items = popularSeries,
+                                    key = { "search_series_${it.query.lowercase()}" },
+                                ) { seriesChip ->
+                                    SearchSeriesChip(
+                                        chip = seriesChip,
+                                        onClick = {
+                                            focusManager.clearFocus()
+                                            onSearchSubmit(seriesChip.query, false, true, FacetType.SERIES)
                                         },
                                     )
                                 }
@@ -579,11 +664,11 @@ fun SearchScreen(
                         onClick = {
                             focusManager.clearFocus()
                             if (card.isLiveCover) {
-                                // LIVE-badged card navigates straight to Live Wallpapers tab with keyword
-                                onSearchSubmit(card.clickKeyword, false, true)
+                                // LIVE-badged card navigates straight to Live Wallpapers tab with Category facet
+                                onSearchSubmit(card.clickKeyword, false, true, FacetType.CATEGORY)
                             } else {
                                 // Static-artwork card navigates straight to 4K Artworks tab with category keyword
-                                onSearchSubmit(card.title, false, false)
+                                onSearchSubmit(card.title, false, false, FacetType.CATEGORY)
                             }
                         },
                     )
@@ -704,13 +789,12 @@ private fun TrendingColorCapsule(
     onClick: () -> Unit,
 ) {
     Surface(
+        onClick = onClick,
         color = ObsidianSurface,
         shape = RoundedCornerShape(50),
         border = BorderStroke(1.dp, InkMuted.copy(alpha = 0.42f)),
         modifier = Modifier
             .height(48.dp)
-            .clip(RoundedCornerShape(50))
-            .clickable(onClick = onClick)
             .testTag("trending_color_${option.id}"),
     ) {
         Row(
@@ -876,7 +960,7 @@ private fun TrendingCategoryCard(
                     .scale(Scale.FILL)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
-                    .allowHardware(true)
+                    .allowHardware(false)
                     .crossfade(120)
                     .build()
             }
@@ -952,13 +1036,12 @@ private fun SearchTagChip(
     onClick: () -> Unit,
 ) {
     Surface(
+        onClick = onClick,
         color = ObsidianSurfaceElevated,
         shape = RoundedCornerShape(12.dp),
         border = BorderStroke(1.dp, HairlineBorder),
         modifier = Modifier
             .height(36.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
             .testTag("search_popular_tag_${chip.query.lowercase().replace(' ', '_')}"),
     ) {
         Row(
@@ -983,13 +1066,49 @@ private fun SearchTagChip(
     }
 }
 
+@Composable
+private fun SearchSeriesChip(
+    chip: LiveTagChip,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        color = ElectricViolet.copy(alpha = 0.14f),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, ElectricViolet.copy(alpha = 0.42f)),
+        modifier = Modifier
+            .height(36.dp)
+            .testTag("search_popular_series_${chip.query.lowercase().replace(' ', '_')}"),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp),
+        ) {
+            Text(
+                text = chip.label,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = InkWhite,
+                maxLines = 1,
+            )
+            if (chip.count > 0) {
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = "· ${chip.count}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ElectricViolet,
+                )
+            }
+        }
+    }
+}
+
 private fun buildTrendingCategoryCards(
     categoryCovers: Map<String, CategoryCoverCandidate>,
     liveFacets: LiveCatalogFacets,
     trendingBanners: List<AppWallpaper>,
 ): List<TrendingCategoryCardItem> {
     fun normalizeKey(value: String): String =
-        value.lowercase().replace(Regex("[^a-z0-9]+"), "")
+        value.lowercase().replace(NON_ALNUM_REGEX, "")
 
     val fallbackAnimeLiveCover = liveFacets.categories.firstOrNull()?.coverUrl
     val fallbackAnimeStaticCover = trendingBanners.firstOrNull()?.thumbnailUrl?.takeIf { it.isNotBlank() }

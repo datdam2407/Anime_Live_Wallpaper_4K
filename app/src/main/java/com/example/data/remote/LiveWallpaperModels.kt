@@ -18,6 +18,7 @@ data class LiveWallpaperItem(
     @Json(name = "slug") val slug: String? = "",
     @Json(name = "title") val title: String? = "",
     @Json(name = "category") val category: String? = "",
+    @Json(name = "series") val series: String? = null,
     @Json(name = "tags") val tags: List<String>? = emptyList(),
     @Json(name = "thumbUrl") val thumbUrl: String? = null,
     @Json(name = "previewUrl") val previewUrl: String? = null,
@@ -36,12 +37,13 @@ data class LiveWallpaperItem(
         val safeFull = normalizeMediaUrl(fullUrl)
         val safePreview = normalizeMediaUrl(previewUrl) ?: safeFull
         val safeCategory = category?.trim().orEmpty().ifEmpty { "Anime Live" }
-        val safeTitle = title?.trim().orEmpty().ifEmpty { safeCategory }
+        val safeSeries = series?.trim()?.takeIf { it.isNotEmpty() } ?: safeCategory
+        val safeTitle = title?.trim().orEmpty().ifEmpty { safeSeries }
 
         return AppWallpaper(
             id = safeId,
             title = safeTitle,
-            animeSeries = safeCategory,
+            animeSeries = safeSeries,
             imageUrl = safeThumb,
             thumbnailUrl = safeThumb,
             videoUrl = safeFull,

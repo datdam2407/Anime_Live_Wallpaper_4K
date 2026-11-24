@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +41,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -108,6 +110,14 @@ fun CategoriesScreen(
     val gridState = rememberLazyGridState()
     var lastHandledScrollTick by rememberSaveable { mutableIntStateOf(scrollToTopTick) }
     var lastHandledFilterText by rememberSaveable { mutableStateOf(filterText) }
+    var visibleSeriesLimit by rememberSaveable(filterText) { mutableIntStateOf(CATEGORIES_PAGE_SIZE) }
+
+    val pagedCategories = remember(categories, visibleSeriesLimit) {
+        categories.take(visibleSeriesLimit.coerceAtLeast(CATEGORIES_PAGE_SIZE))
+    }
+    val hasMoreCategories by remember(categories.size, pagedCategories.size) {
+        derivedStateOf { pagedCategories.size < categories.size }
+    }
 
     LaunchedEffect(scrollToTopTick) {
         if (scrollToTopTick != lastHandledScrollTick) {
@@ -125,6 +135,7 @@ fun CategoriesScreen(
     LaunchedEffect(filterText) {
         if (filterText != lastHandledFilterText) {
             lastHandledFilterText = filterText
+            visibleSeriesLimit = CATEGORIES_PAGE_SIZE
             if (gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0) {
                 gridState.scrollToItem(0, 0)
             }
@@ -137,17 +148,31 @@ fun CategoriesScreen(
         (context.applicationContext as? KuroWallApplication)?.container?.consentManager
     }
     val canRequestAds = consentManager?.canRequestAds?.collectAsStateWithLifecycle()?.value ?: true
-    val gridEntries = remember(categories) {
-        buildCategoriesWithProgressiveAds(categories)
+    val gridEntries = remember(pagedCategories) {
+        buildCategoriesWithProgressiveAds(pagedCategories)
     }
 
-    LaunchedEffect(resolvedAdManager, canRequestAds, categories.isNotEmpty()) {
-        if (canRequestAds && categories.isNotEmpty()) {
+    LaunchedEffect(resolvedAdManager, canRequestAds, pagedCategories.isNotEmpty()) {
+        if (canRequestAds && pagedCategories.isNotEmpty()) {
             resolvedAdManager?.preloadBuffer()
         }
     }
 
-    // Observe visible viewport rows (plus 2 lookahead) with debounce to load 4-panel previews safely.
+    // Automatically paginate Anime 200+ in smooth 18-series chunks as the user approaches the bottom.
+    LaunchedEffect(gridState, gridEntries.size, hasMoreCategories) {
+        snapshotFlow {
+            val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            lastVisible to gridState.layoutInfo.totalItemsCount
+        }
+            .distinctUntilChanged()
+            .collect { (lastVisible, totalCount) ->
+                if (hasMoreCategories && totalCount > 0 && lastVisible >= totalCount - 5) {
+                    visibleSeriesLimit = (visibleSeriesLimit + CATEGORIES_PAGE_SIZE).coerceAtMost(categories.size)
+                }
+            }
+    }
+
+    // Observe visible viewport rows (plus 2 lookahead) to load 4-panel thumbnail previews safely.
     LaunchedEffect(gridState, gridEntries) {
         snapshotFlow {
             val visibleIndices = gridState.layoutInfo.visibleItemsInfo.map { it.index }
@@ -166,7 +191,7 @@ fun CategoriesScreen(
             .distinctUntilChanged()
             .collectLatest { visibleCategories ->
                 if (visibleCategories.isNotEmpty()) {
-                    delay(140L)
+                    delay(80L)
                     onVisibleCategoriesChanged(visibleCategories)
                 }
             }
@@ -308,10 +333,36 @@ fun CategoriesScreen(
                         }
                     }
                 }
+
+                if (hasMoreCategories) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(
+                                color = CrimsonBlade,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Loading more anime worlds (${pagedCategories.size}/${categories.size})…",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = InkMuted,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+private const val CATEGORIES_PAGE_SIZE = 18
 
 @Composable
 private fun AnimeCollectionStripRow(
@@ -423,7 +474,7 @@ private fun AnimeCollectionStripRow(
                                 .scale(Scale.FILL)
                                 .memoryCachePolicy(CachePolicy.ENABLED)
                                 .diskCachePolicy(CachePolicy.ENABLED)
-                                .allowHardware(true)
+                                .allowHardware(false)
                                 .crossfade(220)
                                 .build()
                         }

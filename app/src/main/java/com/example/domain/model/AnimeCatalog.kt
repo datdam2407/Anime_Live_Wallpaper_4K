@@ -44,7 +44,26 @@ data class TrendingAnimeTopic(
     val sorting: String? = null,
     val order: String? = null,
     val initialPage: Int = 1,
-)
+    /** Concise domain stem prepended when combining this category with a #Tag on Wallhaven. */
+    val tagQueryPrefix: String = "",
+) {
+    /**
+     * Builds a clean Wallhaven search query that combines this category with [rawTag].
+     * For Anime (`categories = "010"`), the category bitmask already scopes strictly to Anime,
+     * so sending just the tag avoids over-restricting results while enforcing BOTH Category + Tag.
+     */
+    fun buildCombinedTagQuery(rawTag: String): String {
+        val cleanTag = rawTag.trim().removePrefix("#").trim()
+        if (cleanTag.isEmpty()) return query
+        val prefix = tagQueryPrefix.trim()
+        if (prefix.isEmpty()) return cleanTag
+        return if (cleanTag.contains(prefix, ignoreCase = true)) {
+            cleanTag
+        } else {
+            "$prefix $cleanTag"
+        }
+    }
+}
 
 object AnimeCatalog {
     val animeSearchKeywords: List<String> = listOf(
@@ -259,6 +278,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "",
         ),
         TrendingAnimeTopic(
             title = "Games",
@@ -268,6 +288,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "game",
         ),
         TrendingAnimeTopic(
             title = "City",
@@ -277,6 +298,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "city",
         ),
         TrendingAnimeTopic(
             title = "Cars",
@@ -286,6 +308,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "car",
         ),
         TrendingAnimeTopic(
             title = "Nature",
@@ -295,6 +318,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "nature",
         ),
         TrendingAnimeTopic(
             title = "TV & Movies",
@@ -304,6 +328,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "movie",
         ),
         TrendingAnimeTopic(
             title = "Cute",
@@ -313,6 +338,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "cute",
         ),
         TrendingAnimeTopic(
             title = "Sci-Fi",
@@ -322,6 +348,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "sci-fi",
         ),
         TrendingAnimeTopic(
             title = "Abstract",
@@ -331,6 +358,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "abstract",
         ),
         TrendingAnimeTopic(
             title = "Animals",
@@ -340,6 +368,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "animal",
         ),
         TrendingAnimeTopic(
             title = "Comics",
@@ -349,6 +378,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "comic",
         ),
         TrendingAnimeTopic(
             title = "Lifestyle",
@@ -358,6 +388,7 @@ object AnimeCatalog {
             sorting = "toplist",
             order = "desc",
             initialPage = 1,
+            tagQueryPrefix = "aesthetic",
         ),
     )
 

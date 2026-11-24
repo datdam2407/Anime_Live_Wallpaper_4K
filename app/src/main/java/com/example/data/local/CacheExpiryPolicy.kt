@@ -20,7 +20,7 @@ object CacheExpiryPolicy {
     val TOPLIST_FEED_TTL_MILLIS: Long = TimeUnit.HOURS.toMillis(12)
     val LIVE_SEARCH_TTL_MILLIS: Long = TimeUnit.HOURS.toMillis(6)
     val MAX_RETENTION_MILLIS: Long = TimeUnit.DAYS.toMillis(7)
-    val FORCE_REFRESH_MIN_INTERVAL_MS: Long = TimeUnit.SECONDS.toMillis(8)
+    val FORCE_REFRESH_MIN_INTERVAL_MS: Long = TimeUnit.SECONDS.toMillis(15)
 
     fun ttlMillisFor(
         query: String,

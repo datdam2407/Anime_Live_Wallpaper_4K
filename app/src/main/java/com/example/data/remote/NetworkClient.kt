@@ -138,13 +138,15 @@ object NetworkClient {
 
         return OkHttpClient.Builder()
             .cache(cache)
-            .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS))
+            .dns(NetworkModule.Ipv4PreferredDns)
+            .connectionSpecs(NetworkModule.tlsConnectionSpecs)
+            .retryOnConnectionFailure(true)
             .addInterceptor(headerInterceptor)
             .addInterceptor(offlineInterceptor)
             .addNetworkInterceptor(onlineInterceptor)
             .addInterceptor(logging)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
             .writeTimeout(20, TimeUnit.SECONDS)
             .build()
     }

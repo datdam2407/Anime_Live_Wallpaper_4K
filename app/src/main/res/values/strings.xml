@@ -16,8 +16,11 @@
     <string name="search_trending_color">Trending color</string>
     <string name="search_trending_categories">Trending Categories</string>
     <string name="search_popular_tags">Popular #Tags</string>
+    <string name="search_popular_series">Popular Series</string>
     <string name="search_clear_filter">Clear</string>
     <string name="search_matches_label">%1$d matches for \"%2$s\"</string>
+    <string name="search_matches_faceted_label">%1$d matches · %2$s</string>
+    <string name="search_results_for_label">Results for \"%1$s\"</string>
     <string name="live_tags_section_cd">Live wallpaper tags</string>
     <string name="static_tags_section_cd">Quick mood and style tags</string>
     <string name="settings_saved_title">Saved Wallpapers</string>

@@ -36,9 +36,12 @@ class WallhavenRateLimiter(
         const val DISTRACTION_REQUEST_THRESHOLD = 40
         const val DEFAULT_MAX_REQUESTS_PER_MINUTE = 43
         const val DEFAULT_WINDOW_MILLIS = 60_000L
-        const val DEFAULT_MIN_SPACING_MILLIS = 450L
+        const val DEFAULT_MIN_SPACING_MILLIS = 180L
         const val DEFAULT_COOLDOWN_MILLIS = 45_000L
         const val DEFAULT_BREATHER_SECONDS = 4
+        const val REFRESH_NETWORK_COOLDOWN_MILLIS = 15_000L
+        const val REFRESH_MIN_QUOTA_HEADROOM = 12
+        const val MAX_REFRESH_NETWORK_REQUESTS_PER_MINUTE = 8
 
         /**
          * Monotonic clock immune to NTP sync or user wall-clock changes.
@@ -68,9 +71,19 @@ class WallhavenRateLimiter(
         ) : AcquireResult
     }
 
+    sealed interface RefreshSlotDecision {
+        data object NetworkAllowed : RefreshSlotDecision
+        data class UseLocalShuffle(
+            val cooldownRemainingSec: Long,
+            val quotaProtected: Boolean,
+        ) : RefreshSlotDecision
+    }
+
     private val mutex = Mutex()
     private val requestTimestamps = ArrayDeque<Long>()
+    private val refreshNetworkTimestamps = ArrayDeque<Long>()
     private var lastRequestAtMs: Long = Long.MIN_VALUE
+    private var lastNetworkRefreshAtMs: Long = Long.MIN_VALUE
     private var cooldownUntilMs: Long = Long.MIN_VALUE
     private var distractionShownInCurrentWindow: Boolean = false
     private var distractionSequence: Int = 0
@@ -169,10 +182,70 @@ class WallhavenRateLimiter(
         requestTimestamps.size
     }
 
+    /**
+     * Guards manual Pull-to-Refresh / Refresh button taps so users can refresh as often as they
+     * want without ever threatening Wallhaven's 45 req/min limit:
+     * - Enforces a minimum [cooldownMillis] (default 15s) between network refresh bursts.
+     * - Preserves at least [minQuotaHeadroom] requests in the 60s sliding window for normal browsing.
+     * - Caps total manual-refresh network requests to [MAX_REFRESH_NETWORK_REQUESTS_PER_MINUTE] per minute.
+     * When denied, callers seamlessly serve freshly shuffled local cache with 0 network requests.
+     */
+    suspend fun tryAcquireRefreshSlot(
+        estimatedRequests: Int = 1,
+        cooldownMillis: Long = REFRESH_NETWORK_COOLDOWN_MILLIS,
+        minQuotaHeadroom: Int = REFRESH_MIN_QUOTA_HEADROOM,
+    ): RefreshSlotDecision = mutex.withLock {
+        val now = clock()
+        pruneExpiredLocked(now)
+        val safeEstimate = estimatedRequests.coerceAtLeast(1)
+
+        if (cooldownUntilMs != Long.MIN_VALUE && now < cooldownUntilMs) {
+            val remainingSec = ((cooldownUntilMs - now + 999L) / 1_000L).coerceAtLeast(1L)
+            return@withLock RefreshSlotDecision.UseLocalShuffle(
+                cooldownRemainingSec = remainingSec,
+                quotaProtected = true,
+            )
+        }
+
+        if (lastNetworkRefreshAtMs != Long.MIN_VALUE) {
+            val elapsed = now - lastNetworkRefreshAtMs
+            if (elapsed in 0L until cooldownMillis) {
+                val remainingSec = ((cooldownMillis - elapsed + 999L) / 1_000L).coerceAtLeast(1L)
+                return@withLock RefreshSlotDecision.UseLocalShuffle(
+                    cooldownRemainingSec = remainingSec,
+                    quotaProtected = false,
+                )
+            }
+        }
+
+        val remaining = (maxRequestsPerWindow - requestTimestamps.size).coerceAtLeast(0)
+        val refreshQuotaUsed = refreshNetworkTimestamps.size
+        if (remaining < minQuotaHeadroom + safeEstimate ||
+            refreshQuotaUsed + safeEstimate > MAX_REFRESH_NETWORK_REQUESTS_PER_MINUTE
+        ) {
+            val oldestTs = refreshNetworkTimestamps.firstOrNull() ?: requestTimestamps.firstOrNull()
+            val waitMs = if (oldestTs != null) (oldestTs + windowMillis - now).coerceAtLeast(1_000L) else cooldownMillis
+            val waitSec = ((waitMs + 999L) / 1_000L).coerceAtLeast(1L)
+            return@withLock RefreshSlotDecision.UseLocalShuffle(
+                cooldownRemainingSec = waitSec,
+                quotaProtected = true,
+            )
+        }
+
+        lastNetworkRefreshAtMs = now
+        repeat(safeEstimate) {
+            refreshNetworkTimestamps.addLast(now)
+        }
+        RefreshSlotDecision.NetworkAllowed
+    }
+
     private fun pruneExpiredLocked(now: Long) {
         val cutoff = now - windowMillis
         while (requestTimestamps.isNotEmpty() && requestTimestamps.first() <= cutoff) {
             requestTimestamps.removeFirst()
+        }
+        while (refreshNetworkTimestamps.isNotEmpty() && refreshNetworkTimestamps.first() <= cutoff) {
+            refreshNetworkTimestamps.removeFirst()
         }
         if (distractionThreshold > 0 && requestTimestamps.size < distractionThreshold) {
             distractionShownInCurrentWindow = false

@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.Build
 import android.util.DisplayMetrics
 import android.util.Log
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -119,6 +121,7 @@ import com.example.ads.NativeAdCard
 import com.example.ads.NativeAdStyle
 import com.example.ads.buildDetailPagerEntries
 import com.example.ads.mapWallpaperIndexToPagerPosition
+import com.example.data.remote.NetworkModule
 import com.example.domain.model.AppWallpaper
 import com.example.domain.model.WallpaperTarget
 import com.example.service.DelogoEffect
@@ -253,30 +256,32 @@ fun DetailPreviewScreen(
         }
 
 
-        // Pre-warm neighbor pages
+        // Pre-warm neighbor pages at mobile-optimal size (avoid raw 4K/8K prefetch spikes)
         val loader = context.imageLoader
+        val mobilePrefetchW = prefetchSizePx.first.coerceAtMost(1080)
+        val mobilePrefetchH = prefetchSizePx.second.coerceAtMost(2160)
         listOf(settledPage - 1, settledPage + 1).forEach { neighborIdx ->
             val neighbor = (pagerEntries.getOrNull(neighborIdx) as? DetailPagerEntry.WallpaperPage)?.wallpaper
             if (neighbor != null) {
                 loader.enqueue(
                     ImageRequest.Builder(context)
                         .data(neighbor.thumbnailUrl)
-                        .size(prefetchSizePx.first / 2, prefetchSizePx.second / 2)
                         .precision(Precision.INEXACT)
-                        .scale(Scale.FILL)
                         .memoryCachePolicy(CachePolicy.ENABLED)
                         .diskCachePolicy(CachePolicy.ENABLED)
+                        .allowHardware(false)
                         .build(),
                 )
                 if (!neighbor.isLive) {
                     loader.enqueue(
                         ImageRequest.Builder(context)
                             .data(neighbor.imageUrl)
-                            .size(prefetchSizePx.first, prefetchSizePx.second)
+                            .size(mobilePrefetchW, mobilePrefetchH)
                             .precision(Precision.INEXACT)
-                            .scale(Scale.FILL)
+                            .scale(Scale.FIT)
                             .memoryCachePolicy(CachePolicy.ENABLED)
                             .diskCachePolicy(CachePolicy.ENABLED)
+                            .allowHardware(false)
                             .build(),
                     )
                 }
@@ -347,6 +352,7 @@ fun DetailPreviewScreen(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .statusBarsPadding()
+                        .displayCutoutPadding()
                         .padding(16.dp)
                         .size(48.dp)
                         .clip(CircleShape)
@@ -364,7 +370,8 @@ fun DetailPreviewScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .statusBarsPadding()
-                    .navigationBarsPadding(),
+                    .navigationBarsPadding()
+                    .displayCutoutPadding(),
             ) {
                 Row(
                     modifier = Modifier
@@ -756,8 +763,13 @@ private fun WallpaperProcessingOverlay(
                             strokeWidth = 2.5.dp,
                             modifier = Modifier.size(20.dp),
                         )
+                        val overlayTitle = if (label.contains("Live", ignoreCase = true)) {
+                            "Downloading Live Wallpaper"
+                        } else {
+                            "Applying Wallpaper"
+                        }
                         Text(
-                            text = if (progress != null) "Downloading Live Wallpaper" else "Applying Wallpaper",
+                            text = overlayTitle,
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                             color = InkWhite,
                         )
@@ -819,9 +831,12 @@ private fun CarouselWallpaperCard(
 ) {
     val cardShape = RoundedCornerShape(24.dp)
     var isMediaReady by remember(item.id, item.imageUrl, item.previewVideoUrl, item.videoUrl, item.isLive) {
-        mutableStateOf(false)
+        mutableStateOf(true)
     }
-    val isApplyEnabled = isActive && isMediaReady && !isProcessing
+    // Always keep Apply enabled on the active card (when not already processing) so users never
+    // get locked out while a high-res preview streams in; BitmapCropper / LiveWallpaperDownloader
+    // manages its own verified download + progress bar.
+    val isApplyEnabled = isActive && !isProcessing
 
     Surface(
         shape = cardShape,
@@ -906,13 +921,7 @@ private fun CarouselWallpaperCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
                 ) {
-                    if (!isMediaReady && isActive) {
-                        CircularProgressIndicator(
-                            color = InkMuted.copy(alpha = 0.65f),
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    } else if (item.isLive) {
+                    if (item.isLive) {
                         Image(
                             painter = painterResource(id = R.drawable.ic_premium_crown),
                             contentDescription = null,
@@ -980,68 +989,87 @@ private fun WallpaperMediaContent(
 
         LaunchedEffect(item.id, item.imageUrl) {
             isHighResLoading = true
-            latestOnMediaReadyChanged(false)
+            latestOnMediaReadyChanged(true)
         }
 
         BoxWithConstraints(modifier = modifier) {
-            val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(480, 1440) }
-            val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(640, 2560) }
+            // Cap mobile preview decode to crisp FHD+/2K display bounds (max 1080x2400 / 1440x2560)
+            // so DetailPreview renders fast without allocating huge raw 4K/8K bitmaps in RAM.
+            val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(480, 1280) }
+            val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(800, 2400) }
 
-            val thumbRequest = remember(item.thumbnailUrl, targetWidthPx, targetHeightPx) {
+            // Layer 1 (Instant 0ms progressive base): displays cached thumbnail from Home/Categories immediately.
+            val thumbRequest = remember(item.thumbnailUrl) {
                 ImageRequest.Builder(context)
                     .data(item.thumbnailUrl)
-                    .size((targetWidthPx / 2).coerceAtLeast(360), (targetHeightPx / 2).coerceAtLeast(480))
                     .precision(Precision.INEXACT)
-                    .scale(Scale.FILL)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
-                    .allowHardware(true)
+                    .bitmapConfig(Bitmap.Config.ARGB_8888)
+                    .allowHardware(false)
                     .build()
             }
+            // Layer 2 (Progressive HD upgrade): streams & downsamples mobile-optimal HD seamlessly over thumbnail.
             val fullRequest = remember(item.imageUrl, targetWidthPx, targetHeightPx) {
                 ImageRequest.Builder(context)
                     .data(item.imageUrl)
                     .size(targetWidthPx, targetHeightPx)
                     .precision(Precision.INEXACT)
-                    .scale(Scale.FILL)
+                    .scale(Scale.FIT)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
-                    .allowHardware(true)
-                    .crossfade(160)
+                    .bitmapConfig(Bitmap.Config.ARGB_8888)
+                    .allowHardware(false)
+                    .crossfade(220)
                     .build()
             }
 
-            val thumbPainter = rememberAsyncImagePainter(
+            AsyncImage(
                 model = thumbRequest,
+                contentDescription = "${item.title} instant preview",
                 contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
             )
             AsyncImage(
                 model = fullRequest,
                 contentDescription = "${item.title} full resolution preview",
-                placeholder = thumbPainter,
-                error = thumbPainter,
                 contentScale = ContentScale.Crop,
-                onLoading = {
-                    isHighResLoading = true
-                    latestOnMediaReadyChanged(false)
-                },
+                onLoading = { isHighResLoading = true },
                 onSuccess = {
                     isHighResLoading = false
                     latestOnMediaReadyChanged(true)
                 },
                 onError = {
                     isHighResLoading = false
-                    latestOnMediaReadyChanged(false)
+                    latestOnMediaReadyChanged(true)
                 },
                 modifier = Modifier.fillMaxSize(),
             )
             if (isHighResLoading && isActive) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(
-                        color = CrimsonBlade,
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(34.dp),
-                    )
+                Surface(
+                    color = Color.Black.copy(alpha = 0.56f),
+                    shape = RoundedCornerShape(50),
+                    border = BorderStroke(1.dp, InkWhite.copy(alpha = 0.16f)),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(14.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            color = CyberCyan,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            text = "Loading HD…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = InkWhite.copy(alpha = 0.92f),
+                        )
+                    }
                 }
             }
         }
@@ -1102,15 +1130,17 @@ private fun LiveMp4FullScreenPlayer(
     BoxWithConstraints(modifier = modifier) {
         val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(360, 1080) }
         val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(480, 1920) }
-        val thumbRequest = remember(thumbnailUrl, targetWidthPx, targetHeightPx) {
+        var bypassThumbCache by remember(thumbnailUrl) { mutableStateOf(false) }
+        val thumbRequest = remember(thumbnailUrl, bypassThumbCache, targetWidthPx, targetHeightPx) {
             ImageRequest.Builder(context)
                 .data(thumbnailUrl)
                 .size(targetWidthPx, targetHeightPx)
                 .precision(Precision.INEXACT)
                 .scale(Scale.FILL)
-                .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(CachePolicy.ENABLED)
-                .allowHardware(true)
+                .memoryCachePolicy(if (bypassThumbCache) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED)
+                .diskCachePolicy(if (bypassThumbCache) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED)
+                .bitmapConfig(Bitmap.Config.ARGB_8888)
+                .allowHardware(false)
                 .build()
         }
 
@@ -1118,6 +1148,11 @@ private fun LiveMp4FullScreenPlayer(
             model = thumbRequest,
             contentDescription = null,
             contentScale = ContentScale.Crop,
+            onError = {
+                if (!bypassThumbCache) {
+                    bypassThumbCache = true
+                }
+            },
             modifier = Modifier.fillMaxSize(),
         )
 
@@ -1201,11 +1236,14 @@ private fun ActiveExoPlayerOverlay(
     }
 
     val player = remember(videoUrl, useEffects) {
-        val renderersFactory = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(NetworkModule.MEDIA_USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(10_000)
-            .setReadTimeoutMs(15_000)
+            .setConnectTimeoutMs(20_000)
+            .setReadTimeoutMs(30_000)
         val mediaSourceFactory = DefaultMediaSourceFactory(
             DefaultDataSource.Factory(context, httpDataSourceFactory),
         )

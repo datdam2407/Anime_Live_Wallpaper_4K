@@ -75,7 +75,7 @@ class AppContainer(context: Context) {
                     .build()
             }
             .respectCacheHeaders(false)
-            .allowHardware(true)
+            .allowHardware(false)
             .crossfade(false)
             .build()
     }
@@ -98,6 +98,7 @@ class AppContainer(context: Context) {
         BitmapCropper(
             context = appContext,
             imageLoader = imageLoader,
+            okHttpClient = NetworkModule.mediaOkHttpClient,
         )
     }
 

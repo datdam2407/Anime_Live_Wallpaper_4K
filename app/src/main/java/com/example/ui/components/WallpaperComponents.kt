@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.graphics.Bitmap
 import android.util.Log
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -51,11 +52,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -168,8 +172,54 @@ fun WallpaperStaggeredCard(
 
     val density = LocalDensity.current
     var isLoading by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableStateOf(true) }
-    var useVideoFrameFallback by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableStateOf(false) }
+    var fallbackStage by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableIntStateOf(0) }
     var fallbackFailed by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableStateOf(false) }
+
+    // Ordered candidate chain for cross-device resilience (including Xiaomi MIUI/HyperOS):
+    // Grid cards strictly load lightweight thumbnails (never raw 4K/8K imageUrl) for fast scroll & low RAM.
+    // 0: thumbnailUrl (normal cache)
+    // 1: thumbnailUrl (bypass potentially corrupt disk cache)
+    // 2+: previewVideoUrl / videoUrl frame extraction (for live wallpapers only)
+    val loadCandidates = remember(
+        wallpaper.id,
+        wallpaper.thumbnailUrl,
+        wallpaper.effectivePreviewVideoUrl,
+        wallpaper.videoUrl,
+        wallpaper.isLive,
+    ) {
+        buildList {
+            if (wallpaper.thumbnailUrl.isNotBlank()) {
+                add(wallpaper.thumbnailUrl to false)
+                add(wallpaper.thumbnailUrl to true)
+            }
+            if (wallpaper.isLive) {
+                wallpaper.effectivePreviewVideoUrl
+                    ?.takeIf { it.isNotBlank() && it != wallpaper.thumbnailUrl }
+                    ?.let { add(it to false) }
+                wallpaper.videoUrl
+                    ?.takeIf {
+                        it.isNotBlank() &&
+                                it != wallpaper.thumbnailUrl &&
+                                it != wallpaper.effectivePreviewVideoUrl
+                    }
+                    ?.let { add(it to false) }
+            }
+        }
+    }
+    val currentCandidate = loadCandidates.getOrNull(fallbackStage)
+    val activeUrl = currentCandidate?.first.orEmpty()
+    val bypassDiskCache = currentCandidate?.second == true
+
+    // Wide landscape 4K artworks (e.g. 16:9 / 3840x2160) would get zoomed 3x if center-cropped into
+    // a portrait card. Render them with an ambient blurred-feel backdrop + ContentScale.Fit foreground
+    // so the user clearly sees the full scene & subject from the Home grid while keeping uniform card sizes.
+    val isWideStaticArtwork = remember(wallpaper.isLive, wallpaper.width, wallpaper.height) {
+        !wallpaper.isLive &&
+                wallpaper.width > 0 &&
+                wallpaper.height > 0 &&
+                (wallpaper.width.toFloat() / wallpaper.height.toFloat()) > 1.2f
+    }
+    val portraitFramingAlignment = remember { BiasAlignment(0f, -0.25f) }
 
     BoxWithConstraints(
         modifier = modifier
@@ -189,21 +239,16 @@ fun WallpaperStaggeredCard(
     ) {
         val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(240, 960) }
         val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(320, 1280) }
-        val fallbackPreviewUrl = wallpaper.effectivePreviewVideoUrl
-        val activeUrl = if (useVideoFrameFallback && !fallbackPreviewUrl.isNullOrBlank()) {
-            fallbackPreviewUrl
-        } else {
-            wallpaper.thumbnailUrl
-        }
-        val imageRequest = remember(activeUrl, targetWidthPx, targetHeightPx) {
+        val imageRequest = remember(activeUrl, bypassDiskCache, targetWidthPx, targetHeightPx, isWideStaticArtwork) {
             ImageRequest.Builder(context)
                 .data(activeUrl)
                 .size(targetWidthPx, targetHeightPx)
                 .precision(Precision.INEXACT)
-                .scale(Scale.FILL)
-                .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(CachePolicy.ENABLED)
-                .allowHardware(true)
+                .scale(if (isWideStaticArtwork) Scale.FIT else Scale.FILL)
+                .memoryCachePolicy(if (bypassDiskCache) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED)
+                .diskCachePolicy(if (bypassDiskCache) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED)
+                .bitmapConfig(Bitmap.Config.ARGB_8888)
+                .allowHardware(false)
                 .crossfade(180)
                 .build()
         }
@@ -240,26 +285,34 @@ fun WallpaperStaggeredCard(
                 }
             }
         } else {
+            if (isWideStaticArtwork) {
+                AsyncImage(
+                    model = imageRequest,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .alpha(0.34f),
+                )
+            }
             AsyncImage(
                 model = imageRequest,
                 contentDescription = "${wallpaper.title} wallpaper thumbnail",
-                contentScale = ContentScale.Crop,
+                contentScale = if (isWideStaticArtwork) ContentScale.Fit else ContentScale.Crop,
+                alignment = if (isWideStaticArtwork) Alignment.Center else portraitFramingAlignment,
                 onSuccess = { isLoading = false },
                 onError = { errorState ->
                     if (wallpaper.isLive) {
                         runCatching {
                             Log.e(
                                 "LIVE_DEBUG",
-                                "Grid image load failed id=${wallpaper.id} url=$activeUrl",
+                                "Grid image load failed stage=$fallbackStage id=${wallpaper.id} url=$activeUrl",
                                 errorState.result.throwable,
                             )
                         }
                     }
-                    val canTryFallback = !useVideoFrameFallback &&
-                            !fallbackPreviewUrl.isNullOrBlank() &&
-                            fallbackPreviewUrl != wallpaper.thumbnailUrl
-                    if (canTryFallback) {
-                        useVideoFrameFallback = true
+                    if (fallbackStage + 1 < loadCandidates.size) {
+                        fallbackStage += 1
                     } else {
                         isLoading = false
                         fallbackFailed = true
@@ -416,7 +469,7 @@ fun FilterBottomSheet(
                     onClick = {
                         selectedResolution = ResolutionTier.ALL
                         selectedSort = SortOption.RELEVANCE
-                        selectedRatio = RatioFilter.ALL
+                        selectedRatio = RatioFilter.PORTRAIT_MOBILE
                     },
                 ) {
                     Text("Reset", color = InkMuted)

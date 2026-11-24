@@ -57,14 +57,13 @@ android {
     applicationId = "com.kuroanimelivewallpapers.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 4
-    versionName = "1.0.1"
+    versionCode = 5
+    versionName = "2.0.2"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
-  // Do not remove or modify these signingConfigs. They are necessary for building, installing,
-  // and updating Android apps in AI Studio.
+  // Do not remove or modify these signingConfigs.
   signingConfigs {
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
@@ -93,7 +92,6 @@ android {
       buildConfigField("String", "ADMOB_INTERSTITIAL_AD_UNIT_ID", "\"$releaseAdMobInterstitialId\"")
       buildConfigField("String", "ADMOB_NATIVE_AD_UNIT_ID", "\"$releaseAdMobNativeId\"")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
-      // AI Studio.
       signingConfig = signingConfigs.getByName("release")
     }
     debug {
@@ -103,8 +101,7 @@ android {
       buildConfigField("String", "ADMOB_INTERSTITIAL_AD_UNIT_ID", "\"$testAdMobInterstitialId\"")
       buildConfigField("String", "ADMOB_NATIVE_AD_UNIT_ID", "\"$testAdMobNativeId\"")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
-      // AI Studio.
-     // signingConfig = signingConfigs.getByName("debugConfig")
+    //  signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
   compileOptions {
@@ -151,6 +148,7 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
+  implementation(libs.androidx.fragment.ktx)
   implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
