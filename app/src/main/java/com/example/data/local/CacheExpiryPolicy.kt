@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
  *    fallback until background garbage collection prunes entries older than 7 days.
  */
 object CacheExpiryPolicy {
-    val DEFAULT_FEED_TTL_MILLIS: Long = TimeUnit.HOURS.toMillis(4)
+    val DEFAULT_FEED_TTL_MILLIS: Long = TimeUnit.HOURS.toMillis(12)
     val TOPLIST_FEED_TTL_MILLIS: Long = TimeUnit.HOURS.toMillis(12)
     val LIVE_SEARCH_TTL_MILLIS: Long = TimeUnit.HOURS.toMillis(6)
     val MAX_RETENTION_MILLIS: Long = TimeUnit.DAYS.toMillis(7)
@@ -31,7 +31,7 @@ object CacheExpiryPolicy {
 
         val normalizedQuery = query.trim()
         val isHomeTrending = normalizedQuery.isEmpty() ||
-                normalizedQuery.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true)
+            normalizedQuery.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true)
         val trendingTopic = if (isHomeTrending) null else AnimeCatalog.findTrendingTopic(normalizedQuery)
         val effectiveSorting = when {
             isHomeTrending && sort == SortOption.RELEVANCE -> SortOption.TOPLIST.wallhavenSorting
@@ -43,7 +43,7 @@ object CacheExpiryPolicy {
             SortOption.TOPLIST.wallhavenSorting,
             SortOption.VIEWS.wallhavenSorting,
             SortOption.FAVORITES.wallhavenSorting,
-                -> TOPLIST_FEED_TTL_MILLIS
+            -> TOPLIST_FEED_TTL_MILLIS
             else -> DEFAULT_FEED_TTL_MILLIS
         }
     }

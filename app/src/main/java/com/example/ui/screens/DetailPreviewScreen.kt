@@ -123,6 +123,7 @@ import com.example.ads.buildDetailPagerEntries
 import com.example.ads.mapWallpaperIndexToPagerPosition
 import com.example.data.remote.NetworkModule
 import com.example.domain.model.AppWallpaper
+import com.example.domain.model.WallpaperScaleMode
 import com.example.domain.model.WallpaperTarget
 import com.example.service.DelogoEffect
 import com.example.ui.components.PremiumGoldBorderBrush
@@ -152,7 +153,7 @@ fun DetailPreviewScreen(
     appliedSuccessTarget: String?,
     muteLiveAudio: Boolean,
     onBack: () -> Unit,
-    onSetStaticWallpaper: (AppWallpaper, WallpaperTarget) -> Unit,
+    onSetStaticWallpaper: (AppWallpaper, WallpaperTarget, WallpaperScaleMode) -> Unit,
     onSetLiveWallpaper: (AppWallpaper) -> Unit,
     onToggleFavorite: (AppWallpaper) -> Unit,
     onDismissAppliedSuccess: () -> Unit,
@@ -299,9 +300,9 @@ fun DetailPreviewScreen(
     if (showTargetDialog && currentWallpaper != null && !currentWallpaper.isLive) {
         WallpaperTargetDialog(
             onDismiss = { showTargetDialog = false },
-            onSelectTarget = { target ->
+            onSelectTarget = { target, scaleMode ->
                 showTargetDialog = false
-                onSetStaticWallpaper(currentWallpaper, target)
+                onSetStaticWallpaper(currentWallpaper, target, scaleMode)
             },
         )
     }
@@ -309,7 +310,7 @@ fun DetailPreviewScreen(
 
     fun triggerSetWallpaper(wallpaper: AppWallpaper) {
         // Vẫn chặn nếu đang processing ngầm để tránh người dùng nhấn 2-3 lần liên tiếp gây crash
-        if (isProcessing) return
+        if (isProcessing) return 
 
 
         if (wallpaper.isLive) {
@@ -410,11 +411,9 @@ fun DetailPreviewScreen(
                             BorderStroke(1.dp, HairlineBorder)
                         },
                     ) {
-                        val displayTotal = maxOf(wallpapers.size, totalCountHint ?: 0)
-                        val badgeLabel = if (currentWallpaperPage != null) {
-                            "${currentWallpaperPage.wallpaper.resolutionLabel} • ${currentWallpaperPage.wallpaperIndex + 1}/$displayTotal"
-                        } else {
-                            "Sponsored • Ad"
+                        val badgeLabel = when {
+                            currentWallpaperPage == null -> "Sponsored • Ad"
+                            else -> currentWallpaperPage.wallpaper.resolutionLabel
                         }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -998,6 +997,8 @@ private fun WallpaperMediaContent(
             val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(480, 1280) }
             val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(800, 2400) }
 
+            var bypassFullCache by remember(item.id, item.imageUrl) { mutableStateOf(false) }
+
             // Layer 1 (Instant 0ms progressive base): displays cached thumbnail from Home/Categories immediately.
             val thumbRequest = remember(item.thumbnailUrl) {
                 ImageRequest.Builder(context)
@@ -1010,14 +1011,14 @@ private fun WallpaperMediaContent(
                     .build()
             }
             // Layer 2 (Progressive HD upgrade): streams & downsamples mobile-optimal HD seamlessly over thumbnail.
-            val fullRequest = remember(item.imageUrl, targetWidthPx, targetHeightPx) {
+            val fullRequest = remember(item.imageUrl, targetWidthPx, targetHeightPx, bypassFullCache) {
                 ImageRequest.Builder(context)
                     .data(item.imageUrl)
                     .size(targetWidthPx, targetHeightPx)
                     .precision(Precision.INEXACT)
                     .scale(Scale.FIT)
-                    .memoryCachePolicy(CachePolicy.ENABLED)
-                    .diskCachePolicy(CachePolicy.ENABLED)
+                    .memoryCachePolicy(if (bypassFullCache) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED)
+                    .diskCachePolicy(if (bypassFullCache) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED)
                     .bitmapConfig(Bitmap.Config.ARGB_8888)
                     .allowHardware(false)
                     .crossfade(220)
@@ -1039,9 +1040,20 @@ private fun WallpaperMediaContent(
                     isHighResLoading = false
                     latestOnMediaReadyChanged(true)
                 },
-                onError = {
-                    isHighResLoading = false
-                    latestOnMediaReadyChanged(true)
+                onError = { errorState ->
+                    runCatching {
+                        android.util.Log.e(
+                            "COIL_IMAGE_ERROR",
+                            "Detail image load failed id=${item.id} bypassCache=$bypassFullCache url=${item.imageUrl}",
+                            errorState.result.throwable,
+                        )
+                    }
+                    if (!bypassFullCache) {
+                        bypassFullCache = true
+                    } else {
+                        isHighResLoading = false
+                        latestOnMediaReadyChanged(true)
+                    }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -1166,8 +1178,8 @@ private fun LiveMp4FullScreenPlayer(
                 },
                 onFatalError = { error ->
                     val canTryFallback = !useFallbackUrl &&
-                            !fallbackVideoUrl.isNullOrBlank() &&
-                            fallbackVideoUrl != activeVideoUrl
+                        !fallbackVideoUrl.isNullOrBlank() &&
+                        fallbackVideoUrl != activeVideoUrl
                     if (canTryFallback) {
                         runCatching {
                             Log.w(
@@ -1231,7 +1243,7 @@ private fun ActiveExoPlayerOverlay(
             @Suppress("DEPRECATION")
             wm.defaultDisplay?.getRealMetrics(metrics)
             (metrics.widthPixels.takeIf { it > 0 } ?: 1080) to
-                    (metrics.heightPixels.takeIf { it > 0 } ?: 1920)
+                (metrics.heightPixels.takeIf { it > 0 } ?: 1920)
         }
     }
 
@@ -1373,37 +1385,73 @@ private fun ActiveExoPlayerOverlay(
 @Composable
 private fun WallpaperTargetDialog(
     onDismiss: () -> Unit,
-    onSelectTarget: (WallpaperTarget) -> Unit,
+    onSelectTarget: (WallpaperTarget, WallpaperScaleMode) -> Unit,
 ) {
+    var selectedScaleMode by remember { mutableStateOf(WallpaperScaleMode.CENTER_CROP) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = ObsidianSurface,
         titleContentColor = InkWhite,
         textContentColor = InkMuted,
         title = {
-            Text("Apply Cropped Wallpaper", style = MaterialTheme.typography.headlineMedium)
+            Text("Apply Wallpaper", style = MaterialTheme.typography.headlineMedium)
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Bitmap will be center-cropped to your exact screen resolution before applying.",
+                    text = "Applied at full native resolution with true-to-screen framing.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    WallpaperScaleMode.entries.forEach { mode ->
+                        val isSelected = selectedScaleMode == mode
+                        Surface(
+                            color = if (isSelected) CrimsonBlade.copy(alpha = 0.22f) else ObsidianSurfaceElevated,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(
+                                width = 1.dp,
+                                color = if (isSelected) CrimsonBlade else HairlineBorder,
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { selectedScaleMode = mode }
+                                .testTag("scale_mode_${mode.name.lowercase()}"),
+                        ) {
+                            Text(
+                                text = mode.label,
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                                ),
+                                color = if (isSelected) InkWhite else InkMuted,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = selectedScaleMode.subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = InkMuted,
+                )
+                Spacer(modifier = Modifier.height(2.dp))
                 TargetOptionRow(
                     icon = Icons.Rounded.Home,
                     label = WallpaperTarget.HOME.label,
-                    onClick = { onSelectTarget(WallpaperTarget.HOME) },
+                    onClick = { onSelectTarget(WallpaperTarget.HOME, selectedScaleMode) },
                 )
                 TargetOptionRow(
                     icon = Icons.Rounded.Lock,
                     label = WallpaperTarget.LOCK.label,
-                    onClick = { onSelectTarget(WallpaperTarget.LOCK) },
+                    onClick = { onSelectTarget(WallpaperTarget.LOCK, selectedScaleMode) },
                 )
                 TargetOptionRow(
                     icon = Icons.Rounded.PhoneAndroid,
                     label = WallpaperTarget.BOTH.label,
-                    onClick = { onSelectTarget(WallpaperTarget.BOTH) },
+                    onClick = { onSelectTarget(WallpaperTarget.BOTH, selectedScaleMode) },
                 )
             }
         },

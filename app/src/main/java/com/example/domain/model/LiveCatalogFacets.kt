@@ -103,9 +103,9 @@ data class LiveFilterState(
 ) {
     val isHome: Boolean
         get() = query.isBlank() &&
-                selectedCategory == null &&
-                selectedSeries == null &&
-                selectedTags.isEmpty()
+            selectedCategory == null &&
+            selectedSeries == null &&
+            selectedTags.isEmpty()
 
     /** True whenever the user is filtering by Category and/or Tag chips (used to hide paginated match counts). */
     val isChipFilterActive: Boolean
@@ -142,9 +142,9 @@ data class LiveFilterState(
         val cleaned = series.trim()
         if (cleaned.isEmpty()) return LiveFilterState()
         val isSameOnlyChip = selectedSeries.equals(cleaned, ignoreCase = true) &&
-                selectedCategory == null &&
-                selectedTags.isEmpty() &&
-                query.isBlank()
+            selectedCategory == null &&
+            selectedTags.isEmpty() &&
+            query.isBlank()
         return if (isSameOnlyChip) {
             LiveFilterState()
         } else {
@@ -375,35 +375,85 @@ object CrossTabSearchSync {
         currentStaticFilter: StaticFilterState,
         searchInput: String,
         isColorSearch: Boolean = false,
+        matchedExploreCategoryTitle: String? = null,
         homeTrendingKey: String = DEFAULT_HOME_KEY,
     ): SyncedTabFilters {
         val cleanedInput = searchInput.trim().removePrefix("#").trim()
         val isTagInput = searchInput.trim().startsWith("#")
 
-        val resolvedLive = if (targetIsLive && cleanedInput.isNotEmpty()) {
-            val currentLiveDisplay = currentLiveFilter.displayInputText().removePrefix("#").trim()
-            if (currentLiveDisplay.equals(cleanedInput, ignoreCase = true)) {
-                currentLiveFilter
-            } else if (isTagInput) {
-                LiveFilterState(selectedTags = setOf(cleanedInput.lowercase()))
-            } else {
-                LiveFilterState(query = cleanedInput, isColorSearch = isColorSearch)
+        val resolvedLive = if (targetIsLive) {
+            when {
+                cleanedInput.isNotEmpty() -> {
+                    val currentLiveDisplay = currentLiveFilter.displayInputText().removePrefix("#").trim()
+                    if (currentLiveDisplay.equals(cleanedInput, ignoreCase = true)) {
+                        currentLiveFilter
+                    } else if (isTagInput) {
+                        LiveFilterState(selectedTags = setOf(cleanedInput.lowercase()))
+                    } else {
+                        LiveFilterState(query = cleanedInput, isColorSearch = isColorSearch)
+                    }
+                }
+                currentStaticFilter.isChipFilterActive -> {
+                    LiveFilterState(
+                        selectedCategory = currentStaticFilter.selectedCategory?.trim()?.takeIf { it.isNotEmpty() },
+                        selectedTags = currentStaticFilter.selectedTag
+                            ?.trim()
+                            ?.removePrefix("#")
+                            ?.trim()
+                            ?.lowercase()
+                            ?.takeIf { it.isNotEmpty() }
+                            ?.let { setOf(it) }
+                            ?: emptySet(),
+                    )
+                }
+                currentStaticFilter.searchQuery.isNotBlank() -> {
+                    LiveFilterState(
+                        query = currentStaticFilter.searchQuery.trim(),
+                        isColorSearch = isColorSearch,
+                    )
+                }
+                else -> LiveFilterState()
             }
         } else {
             currentLiveFilter
         }
 
-        val resolvedStatic = if (!targetIsLive && cleanedInput.isNotEmpty()) {
-            val currentStaticKey = currentStaticFilter.toQueryKey(homeTrendingKey)
-            if (currentStaticKey.equals(cleanedInput, ignoreCase = true) ||
-                currentStaticFilter.selectedTag.equals(cleanedInput, ignoreCase = true) ||
-                currentStaticFilter.selectedCategory.equals(cleanedInput, ignoreCase = true)
-            ) {
-                currentStaticFilter
-            } else if (isTagInput) {
-                StaticFilterState(selectedTag = cleanedInput)
-            } else {
-                StaticFilterState(searchQuery = cleanedInput)
+        val resolvedStatic = if (!targetIsLive) {
+            when {
+                cleanedInput.isNotEmpty() -> {
+                    val currentStaticKey = currentStaticFilter.toQueryKey(homeTrendingKey)
+                    if (currentStaticKey.equals(cleanedInput, ignoreCase = true) ||
+                        currentStaticFilter.selectedTag.equals(cleanedInput, ignoreCase = true) ||
+                        currentStaticFilter.selectedCategory.equals(cleanedInput, ignoreCase = true)
+                    ) {
+                        currentStaticFilter
+                    } else if (isTagInput) {
+                        StaticFilterState(selectedTag = cleanedInput)
+                    } else {
+                        StaticFilterState(searchQuery = cleanedInput)
+                    }
+                }
+                currentLiveFilter.isChipFilterActive -> {
+                    val cat = currentLiveFilter.selectedCategory?.trim()?.takeIf { it.isNotEmpty() }
+                    val tag = currentLiveFilter.selectedTags.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+                    when {
+                        cat != null && matchedExploreCategoryTitle != null -> StaticFilterState(
+                            selectedCategory = matchedExploreCategoryTitle,
+                            selectedTag = tag,
+                        )
+                        cat != null && tag != null -> StaticFilterState(searchQuery = "$cat $tag")
+                        cat != null -> StaticFilterState(searchQuery = cat)
+                        tag != null -> StaticFilterState(selectedTag = tag)
+                        else -> StaticFilterState()
+                    }
+                }
+                !currentLiveFilter.selectedSeries.isNullOrBlank() -> {
+                    StaticFilterState(searchQuery = currentLiveFilter.selectedSeries.trim())
+                }
+                currentLiveFilter.query.isNotBlank() -> {
+                    StaticFilterState(searchQuery = currentLiveFilter.query.trim())
+                }
+                else -> StaticFilterState()
             }
         } else {
             currentStaticFilter

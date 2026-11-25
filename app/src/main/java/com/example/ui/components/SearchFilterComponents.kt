@@ -392,14 +392,9 @@ fun LiveCatalogFilterSection(
             ) {
                 item(key = "cat_all") {
                     val allSelected = filterState.selectedCategory == null &&
-                            filterState.selectedSeries == null &&
-                            filterState.selectedTags.isEmpty() &&
-                            filterState.query.isBlank()
-                    val allLabel = if (facets.totalWallpapers > 0) {
-                        "All (${facets.totalWallpapers})"
-                    } else {
-                        "All"
-                    }
+                        filterState.selectedSeries == null &&
+                        filterState.selectedTags.isEmpty() &&
+                        filterState.query.isBlank()
                     Surface(
                         onClick = onClearFilter,
                         color = if (allSelected) CrimsonBlade else ObsidianSurfaceElevated,
@@ -417,7 +412,7 @@ fun LiveCatalogFilterSection(
                             modifier = Modifier.padding(horizontal = 14.dp),
                         ) {
                             Text(
-                                text = allLabel,
+                                text = "All",
                                 style = MaterialTheme.typography.labelLarge.copy(
                                     fontWeight = if (allSelected) FontWeight.Bold else FontWeight.Medium,
                                 ),
@@ -456,14 +451,6 @@ fun LiveCatalogFilterSection(
                                 color = if (selected) InkWhite else InkMuted,
                                 maxLines = 1,
                             )
-                            if (chip.count > 0) {
-                                Spacer(modifier = Modifier.width(5.dp))
-                                Text(
-                                    text = "${chip.count}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (selected) PremiumGold else InkSubtle,
-                                )
-                            }
                         }
                     }
                 }
@@ -627,7 +614,7 @@ fun StaticCatalogFilterSection(
                     key = { it.title },
                 ) { topic ->
                     val selected = filterState.selectedCategory.equals(topic.title, ignoreCase = true) ||
-                            filterState.selectedCategory.equals(topic.query, ignoreCase = true)
+                        filterState.selectedCategory.equals(topic.query, ignoreCase = true)
                     Surface(
                         onClick = { onToggleCategory(topic.title) },
                         color = if (selected) CrimsonBlade else ObsidianSurfaceElevated,

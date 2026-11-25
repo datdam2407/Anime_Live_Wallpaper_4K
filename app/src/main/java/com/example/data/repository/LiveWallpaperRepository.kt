@@ -14,17 +14,26 @@ import com.example.domain.model.LiveFilterState
 import com.example.domain.model.LiveSearchSuggestion
 import com.example.domain.model.LiveTagChip
 import com.example.domain.model.SearchSuggestionType
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.text.Normalizer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.random.Random
 
 data class LivePageResult(
@@ -34,20 +43,24 @@ data class LivePageResult(
 )
 
 /**
- * Coordinates the jsDelivr + Cloudflare R2 Live Wallpaper pipeline:
+ * Coordinates the jsDelivr / GitHub Raw + Cloudflare R2 Live Wallpaper pipeline:
  * 1. Grid: [LiveWallpaperItem.thumbUrl] (~35 KB)
  * 2. Detail Preview: [LiveWallpaperItem.previewUrl] (~350 KB)
  * 3. Apply / Save Offline: [LiveWallpaperItem.fullUrl] (~1–8 MB) cached once in filesDir/live_wallpapers/
- * 4. Dynamic Facets & Multi-Keyword Search across title, tags, category, and slug from live_wallpapers_v1.json.
+ * 4. Persistent Disk JSON Cache + RAM pre-normalized index for <2ms in-memory filtering across
+ *    category, series, tags, title, and slug from live_wallpapers_v1.json.
  */
 class LiveWallpaperRepository(
     private val api: LiveCatalogApi,
     private val downloader: LiveWallpaperDownloader,
     private val clock: () -> Long = { System.currentTimeMillis() },
+    private val catalogCacheFile: File? = null,
+    private val fallbackHeadStartMs: Long = DEFAULT_FALLBACK_HEAD_START_MS,
 ) {
     constructor(context: Context) : this(
         api = NetworkClient.createLiveCatalogApi(context),
         downloader = LiveWallpaperDownloader(context),
+        catalogCacheFile = File(context.applicationContext.filesDir, DEFAULT_DISK_CACHE_FILE_NAME),
     )
 
     companion object {
@@ -120,11 +133,38 @@ class LiveWallpaperRepository(
         )
         private const val DISPLAY_TAG_LIMIT = 18
         const val LIVE_CATALOG_REFRESH_COOLDOWN_MS = 60_000L
+        const val DEFAULT_DISK_CACHE_FILE_NAME = "live_catalog_cache_v1.json"
+        const val DEFAULT_FALLBACK_HEAD_START_MS = 800L
+
+        private val catalogMoshi: Moshi by lazy {
+            Moshi.Builder()
+                .addLast(KotlinJsonAdapterFactory())
+                .build()
+        }
+        private val catalogJsonAdapter by lazy {
+            catalogMoshi.adapter(LiveCatalogResponse::class.java)
+        }
     }
 
+    private class IndexedLiveItem(
+        val item: LiveWallpaperItem,
+        val catCollapsed: String,
+        val seriesCollapsed: String,
+        val titleCollapsed: String,
+        val slugCollapsed: String,
+        val idCollapsed: String,
+        val tagCollapsedList: List<String>,
+        val fieldTokens: Set<String>,
+        val combinedCollapsed: String,
+    )
+
     private val catalogMutex = Mutex()
+    private val diskHydrationAttempted = AtomicBoolean(false)
+    private val backgroundRefreshInFlight = AtomicBoolean(false)
     @Volatile
     private var memoryCatalog: List<LiveWallpaperItem> = emptyList()
+    @Volatile
+    private var indexedCatalog: List<IndexedLiveItem> = emptyList()
     private val liveCoverUrlCache = ConcurrentHashMap<String, List<String>>()
     @Volatile
     private var lastCatalogFetchedAtMs: Long = Long.MIN_VALUE
@@ -140,12 +180,120 @@ class LiveWallpaperRepository(
     private val _catalogFacets = MutableStateFlow(LiveCatalogFacets())
     val catalogFacets: StateFlow<LiveCatalogFacets> = _catalogFacets.asStateFlow()
 
-    suspend fun fetchLiveWallpapers(forceRefresh: Boolean = false): Result<List<LiveWallpaperItem>> =
+    val hasCatalogInMemory: Boolean
+        get() = memoryCatalog.isNotEmpty()
+
+    /**
+     * Immediately hydrates [memoryCatalog] from the persistent local JSON cache on [Dispatchers.IO]
+     * (typically <15ms) and launches a non-blocking network race refresh in the background so Live
+     * Wallpapers are ready instantaneously when the user switches tabs.
+     */
+    fun prefetchCatalog(scope: CoroutineScope) {
+        scope.launch(Dispatchers.IO) {
+            hydrateFromDiskIfNeeded()
+            if (backgroundRefreshInFlight.compareAndSet(false, true)) {
+                try {
+                    fetchLiveWallpapers(forceRefresh = false, allowNetworkRefreshOverDisk = true)
+                } finally {
+                    backgroundRefreshInFlight.set(false)
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads previously persisted `live_wallpapers_v1.json` from local disk into RAM + search index
+     * so cold starts have instant 0ms live catalog access without waiting for the network.
+     */
+    suspend fun hydrateFromDiskIfNeeded(): Boolean = withContext(Dispatchers.IO) {
+        if (memoryCatalog.isNotEmpty()) return@withContext true
+        val cacheFile = catalogCacheFile ?: return@withContext false
+        if (!diskHydrationAttempted.compareAndSet(false, true)) {
+            return@withContext memoryCatalog.isNotEmpty()
+        }
+        if (!cacheFile.exists() || cacheFile.length() <= 0L) return@withContext false
+        val parsedItems = runCatching {
+            val rawJson = cacheFile.readText(Charsets.UTF_8)
+            val parsed = catalogJsonAdapter.fromJson(rawJson)
+            sanitizeCatalogItems(parsed?.wallpapers.orEmpty())
+        }.getOrElse { err ->
+            runCatching { Log.w(DEBUG_TAG, "Failed to hydrate live catalog disk cache: ${err.message}") }
+            emptyList()
+        }
+        if (parsedItems.isEmpty()) return@withContext false
+        if (memoryCatalog.isEmpty()) {
+            publishCatalogToMemory(parsedItems, fetchedFromNetwork = false)
+            runCatching {
+                Log.d(DEBUG_TAG, "Hydrated ${parsedItems.size} live wallpapers from disk cache instantly")
+            }
+        }
+        true
+    }
+
+    private fun sanitizeCatalogItems(rawList: List<LiveWallpaperItem>): List<LiveWallpaperItem> {
+        return rawList.filter { item ->
+            !item.id.isNullOrBlank() &&
+                (!item.thumbUrl.isNullOrBlank() || !item.previewUrl.isNullOrBlank()) &&
+                !item.fullUrl.isNullOrBlank()
+        }
+    }
+
+    private fun publishCatalogToMemory(
+        items: List<LiveWallpaperItem>,
+        fetchedFromNetwork: Boolean,
+    ) {
+        val indexed = items.map { buildIndexedItem(it) }
+        memoryCatalog = items
+        indexedCatalog = indexed
+        if (fetchedFromNetwork) {
+            lastCatalogFetchedAtMs = clock()
+        }
+        liveCoverUrlCache.clear()
+        val rotationSeed = tagRotationCounter
+        val nextFacets = extractCatalogFacets(
+            items = items,
+            rotationSeed = rotationSeed,
+            deprioritizeTagKeys = if (rotationSeed > 0) activeRotationDeprioritizedKeys else emptySet(),
+        )
+        if (lastDisplayedTagKeys.isEmpty()) {
+            lastDisplayedTagKeys = nextFacets.displayTags.map { normalize(it.query) }.toSet()
+        }
+        _catalogFacets.value = nextFacets
+    }
+
+    private fun persistCatalogToDisk(response: LiveCatalogResponse) {
+        val targetFile = catalogCacheFile ?: return
+        runCatching {
+            targetFile.parentFile?.mkdirs()
+            val serialized = catalogJsonAdapter.toJson(response)
+            val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
+            tempFile.writeText(serialized, Charsets.UTF_8)
+            if (!tempFile.renameTo(targetFile)) {
+                targetFile.writeText(serialized, Charsets.UTF_8)
+                tempFile.delete()
+            }
+        }.onFailure { err ->
+            runCatching { Log.w(DEBUG_TAG, "Unable to persist live catalog cache: ${err.message}") }
+        }
+    }
+
+    suspend fun fetchLiveWallpapers(
+        forceRefresh: Boolean = false,
+        allowNetworkRefreshOverDisk: Boolean = false,
+    ): Result<List<LiveWallpaperItem>> =
         withContext(Dispatchers.IO) {
+            if (memoryCatalog.isEmpty()) {
+                hydrateFromDiskIfNeeded()
+            }
             val nowMs = clock()
-            val withinNetworkCooldown = lastCatalogFetchedAtMs != Long.MIN_VALUE &&
-                    (nowMs - lastCatalogFetchedAtMs) in 0L until LIVE_CATALOG_REFRESH_COOLDOWN_MS
-            if (memoryCatalog.isNotEmpty() && (!forceRefresh || withinNetworkCooldown)) {
+            val fetchedFromNetworkRecently = lastCatalogFetchedAtMs != Long.MIN_VALUE &&
+                (nowMs - lastCatalogFetchedAtMs) in 0L until LIVE_CATALOG_REFRESH_COOLDOWN_MS
+            val shouldReturnMemoryImmediately = memoryCatalog.isNotEmpty() && when {
+                forceRefresh -> fetchedFromNetworkRecently
+                allowNetworkRefreshOverDisk -> lastCatalogFetchedAtMs != Long.MIN_VALUE
+                else -> true
+            }
+            if (shouldReturnMemoryImmediately) {
                 if (_catalogFacets.value.totalWallpapers != memoryCatalog.size) {
                     _catalogFacets.value = extractCatalogFacets(memoryCatalog)
                 }
@@ -154,8 +302,13 @@ class LiveWallpaperRepository(
             catalogMutex.withLock {
                 val lockedNowMs = clock()
                 val lockedWithinCooldown = lastCatalogFetchedAtMs != Long.MIN_VALUE &&
-                        (lockedNowMs - lastCatalogFetchedAtMs) in 0L until LIVE_CATALOG_REFRESH_COOLDOWN_MS
-                if (memoryCatalog.isNotEmpty() && (!forceRefresh || lockedWithinCooldown)) {
+                    (lockedNowMs - lastCatalogFetchedAtMs) in 0L until LIVE_CATALOG_REFRESH_COOLDOWN_MS
+                val lockedShouldReturnMemory = memoryCatalog.isNotEmpty() && when {
+                    forceRefresh -> lockedWithinCooldown
+                    allowNetworkRefreshOverDisk -> lastCatalogFetchedAtMs != Long.MIN_VALUE
+                    else -> true
+                }
+                if (lockedShouldReturnMemory) {
                     if (_catalogFacets.value.totalWallpapers != memoryCatalog.size) {
                         _catalogFacets.value = extractCatalogFacets(memoryCatalog)
                     }
@@ -164,34 +317,19 @@ class LiveWallpaperRepository(
                 try {
                     val response = fetchCatalogWithFallback()
                     val rawList = response.wallpapers.orEmpty()
-                    val items = rawList.filter { item ->
-                        !item.id.isNullOrBlank() &&
-                                (!item.thumbUrl.isNullOrBlank() || !item.previewUrl.isNullOrBlank()) &&
-                                !item.fullUrl.isNullOrBlank()
-                    }
+                    val items = sanitizeCatalogItems(rawList)
                     runCatching {
                         Log.d(
                             DEBUG_TAG,
                             "Fetched R2 live catalog: raw=${rawList.size}, valid=${items.size}, " +
-                                    "firstThumb=${items.firstOrNull()?.thumbUrl}, " +
-                                    "firstPreview=${items.firstOrNull()?.previewUrl}, " +
-                                    "firstFull=${items.firstOrNull()?.fullUrl}",
+                                "firstThumb=${items.firstOrNull()?.thumbUrl}, " +
+                                "firstPreview=${items.firstOrNull()?.previewUrl}, " +
+                                "firstFull=${items.firstOrNull()?.fullUrl}",
                         )
                     }
                     if (items.isNotEmpty()) {
-                        memoryCatalog = items
-                        lastCatalogFetchedAtMs = clock()
-                        liveCoverUrlCache.clear()
-                        val rotationSeed = tagRotationCounter
-                        val nextFacets = extractCatalogFacets(
-                            items = items,
-                            rotationSeed = rotationSeed,
-                            deprioritizeTagKeys = if (rotationSeed > 0) activeRotationDeprioritizedKeys else emptySet(),
-                        )
-                        if (lastDisplayedTagKeys.isEmpty()) {
-                            lastDisplayedTagKeys = nextFacets.displayTags.map { normalize(it.query) }.toSet()
-                        }
-                        _catalogFacets.value = nextFacets
+                        publishCatalogToMemory(items, fetchedFromNetwork = true)
+                        persistCatalogToDisk(response.copy(wallpapers = items, total = items.size))
                         Result.success(items)
                     } else if (memoryCatalog.isNotEmpty()) {
                         Result.success(memoryCatalog)
@@ -221,24 +359,60 @@ class LiveWallpaperRepository(
             }
         }
 
-    private suspend fun fetchCatalogWithFallback(): LiveCatalogResponse {
-        return try {
-            api.getLiveCatalog()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (primaryError: Exception) {
-            runCatching {
-                Log.e(
-                    DEBUG_TAG,
-                    "jsDelivr getLiveCatalog failed (${primaryError.javaClass.simpleName}): ${primaryError.message}. Retrying GitHub Raw fallback...",
-                    primaryError,
-                )
-            }
+    /**
+     * Staggered parallel race between jsDelivr CDN and GitHub Raw mirror:
+     * - jsDelivr starts immediately; if it responds within [fallbackHeadStartMs], GitHub Raw is never called.
+     * - If jsDelivr fails early OR stalls past [fallbackHeadStartMs], GitHub Raw races in parallel;
+     *   whichever returns a valid non-empty catalog first wins immediately and cancels the slower request.
+     */
+    private suspend fun fetchCatalogWithFallback(): LiveCatalogResponse = supervisorScope {
+        val winner = CompletableDeferred<LiveCatalogResponse>()
+        val wakeFallback = CompletableDeferred<Unit>()
+        val primaryErrorRef = AtomicReference<Throwable?>(null)
+        val fallbackErrorRef = AtomicReference<Throwable?>(null)
+        val emptyResponseRef = AtomicReference<LiveCatalogResponse?>(null)
+
+        val primaryJob = launch {
             try {
-                api.getLiveCatalogByUrl(LiveCatalogApi.GITHUB_RAW_FALLBACK_URL)
+                val primaryResponse = api.getLiveCatalog()
+                if (primaryResponse.wallpapers.orEmpty().isNotEmpty()) {
+                    winner.complete(primaryResponse)
+                } else {
+                    emptyResponseRef.compareAndSet(null, primaryResponse)
+                    wakeFallback.complete(Unit)
+                }
             } catch (e: CancellationException) {
                 throw e
-            } catch (fallbackError: Exception) {
+            } catch (primaryError: Throwable) {
+                primaryErrorRef.set(primaryError)
+                runCatching {
+                    Log.w(
+                        DEBUG_TAG,
+                        "jsDelivr getLiveCatalog failed (${primaryError.javaClass.simpleName}): ${primaryError.message}. Racing GitHub Raw mirror...",
+                    )
+                }
+                wakeFallback.complete(Unit)
+            }
+        }
+
+        val fallbackJob = launch {
+            if (fallbackHeadStartMs > 0L) {
+                withTimeoutOrNull(fallbackHeadStartMs) {
+                    wakeFallback.await()
+                }
+            }
+            if (winner.isCompleted) return@launch
+            try {
+                val fallbackResponse = api.getLiveCatalogByUrl(LiveCatalogApi.GITHUB_RAW_FALLBACK_URL)
+                if (fallbackResponse.wallpapers.orEmpty().isNotEmpty()) {
+                    winner.complete(fallbackResponse)
+                } else {
+                    emptyResponseRef.compareAndSet(null, fallbackResponse)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (fallbackError: Throwable) {
+                fallbackErrorRef.set(fallbackError)
                 runCatching {
                     Log.e(
                         DEBUG_TAG,
@@ -246,8 +420,31 @@ class LiveWallpaperRepository(
                         fallbackError,
                     )
                 }
-                throw primaryError
             }
+        }
+
+        val completionWatcher = launch {
+            primaryJob.join()
+            fallbackJob.join()
+            if (!winner.isCompleted) {
+                val empty = emptyResponseRef.get()
+                if (empty != null) {
+                    winner.complete(empty)
+                } else {
+                    val failure = primaryErrorRef.get()
+                        ?: fallbackErrorRef.get()
+                        ?: IllegalStateException("Both jsDelivr and GitHub Raw live catalog mirrors failed.")
+                    winner.completeExceptionally(failure)
+                }
+            }
+        }
+
+        try {
+            winner.await()
+        } finally {
+            completionWatcher.cancel()
+            primaryJob.cancel()
+            fallbackJob.cancel()
         }
     }
 
@@ -262,14 +459,16 @@ class LiveWallpaperRepository(
             return Result.failure(error)
         }
 
-        val filtered = filterAndRankItems(items, query)
-        val ordered = applyFeedShuffle(
-            items = filtered,
-            seedKey = query.trim().lowercase(),
-            preserveRelevanceTiers = query.isNotBlank() &&
+        return withContext(Dispatchers.Default) {
+            val filtered = filterAndRankItems(items, query)
+            val ordered = applyFeedShuffle(
+                items = filtered,
+                seedKey = query.trim().lowercase(),
+                preserveRelevanceTiers = query.isNotBlank() &&
                     !query.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true),
-        )
-        return Result.success(paginateItems(ordered, page, pageSize))
+            )
+            Result.success(paginateItems(ordered, page, pageSize))
+        }
     }
 
     suspend fun getLiveWallpapersPage(
@@ -283,13 +482,15 @@ class LiveWallpaperRepository(
             return Result.failure(error)
         }
 
-        val filtered = filterAndRankItems(items, filterState)
-        val ordered = applyFeedShuffle(
-            items = filtered,
-            seedKey = filterState.cacheKey(),
-            preserveRelevanceTiers = filterState.query.isNotBlank() || filterState.selectedTags.isNotEmpty(),
-        )
-        return Result.success(paginateItems(ordered, page, pageSize))
+        return withContext(Dispatchers.Default) {
+            val filtered = filterAndRankItems(items, filterState)
+            val ordered = applyFeedShuffle(
+                items = filtered,
+                seedKey = filterState.cacheKey(),
+                preserveRelevanceTiers = filterState.query.isNotBlank() || filterState.selectedTags.isNotEmpty(),
+            )
+            Result.success(paginateItems(ordered, page, pageSize))
+        }
     }
 
     fun getCachedCatalogSnapshot(
@@ -304,7 +505,7 @@ class LiveWallpaperRepository(
             items = filtered,
             seedKey = query.trim().lowercase(),
             preserveRelevanceTiers = query.isNotBlank() &&
-                    !query.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true),
+                !query.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true),
         )
         return paginateItems(ordered, page, pageSize)
     }
@@ -782,23 +983,79 @@ class LiveWallpaperRepository(
 
     fun getDownloadedStorageBytes(): Long = downloader.getDownloadedStorageBytes()
 
+    private fun buildIndexedItem(item: LiveWallpaperItem): IndexedLiveItem {
+        val rawCategory = item.category.orEmpty()
+        val rawSeries = item.series.orEmpty()
+        val rawTitle = item.title.orEmpty()
+        val rawSlug = item.slug.orEmpty()
+        val rawId = item.id.orEmpty()
+        val rawTags = item.tags.orEmpty()
+
+        val catCollapsed = normalize(rawCategory)
+        val seriesCollapsed = normalize(rawSeries)
+        val titleCollapsed = normalize(rawTitle)
+        val slugCollapsed = normalize(rawSlug)
+        val idCollapsed = normalize(rawId)
+        val tagCollapsedList = rawTags.map { normalize(it) }.filter { it.isNotEmpty() }
+
+        val fieldTokens = HashSet<String>().apply {
+            addAll(tokenize(rawTitle))
+            addAll(tokenize(rawSeries))
+            addAll(tokenize(rawCategory))
+            addAll(tokenize(rawSlug))
+            rawTags.forEach { addAll(tokenize(it)) }
+        }
+        val combinedCollapsed = buildString {
+            append(titleCollapsed)
+            append(' ')
+            append(seriesCollapsed)
+            append(' ')
+            append(catCollapsed)
+            append(' ')
+            append(slugCollapsed)
+            tagCollapsedList.forEach {
+                append(' ')
+                append(it)
+            }
+        }
+        return IndexedLiveItem(
+            item = item,
+            catCollapsed = catCollapsed,
+            seriesCollapsed = seriesCollapsed,
+            titleCollapsed = titleCollapsed,
+            slugCollapsed = slugCollapsed,
+            idCollapsed = idCollapsed,
+            tagCollapsedList = tagCollapsedList,
+            fieldTokens = fieldTokens,
+            combinedCollapsed = combinedCollapsed,
+        )
+    }
+
+    private fun resolveIndexedPool(items: List<LiveWallpaperItem>): List<IndexedLiveItem> {
+        val currentIndexed = indexedCatalog
+        if (items === memoryCatalog && currentIndexed.size == items.size) {
+            return currentIndexed
+        }
+        return items.map { buildIndexedItem(it) }
+    }
+
     internal fun filterAndRankItems(
         items: List<LiveWallpaperItem>,
         filterState: LiveFilterState,
     ): List<LiveWallpaperItem> {
         if (filterState.isHome) return items
 
-        var working = items
+        var working = resolveIndexedPool(items)
 
         // 1. Category facet (exact category match first; fallback to synonym/keyword match for legacy JSONs)
         val rawCategory = filterState.selectedCategory?.trim().orEmpty()
         if (rawCategory.isNotEmpty()) {
             val catNorm = normalize(rawCategory)
-            val exactCat = working.filter { normalize(it.category.orEmpty()) == catNorm }
+            val exactCat = working.filter { it.catCollapsed == catNorm }
             working = if (exactCat.isNotEmpty()) {
                 exactCat
             } else {
-                filterAndRankItems(working, rawCategory)
+                filterAndRankIndexed(working, rawCategory)
             }
             if (working.isEmpty()) return emptyList()
         }
@@ -807,15 +1064,14 @@ class LiveWallpaperRepository(
         val rawSeries = filterState.selectedSeries?.trim().orEmpty()
         if (rawSeries.isNotEmpty()) {
             val seriesNorm = normalize(rawSeries)
-            val exactSeries = working.filter { item ->
-                val itemSeriesNorm = normalize(item.series.orEmpty())
-                val itemCatNorm = normalize(item.category.orEmpty())
-                itemSeriesNorm == seriesNorm || (itemSeriesNorm.isEmpty() && itemCatNorm == seriesNorm)
+            val exactSeries = working.filter { indexed ->
+                indexed.seriesCollapsed == seriesNorm ||
+                    (indexed.seriesCollapsed.isEmpty() && indexed.catCollapsed == seriesNorm)
             }
             working = if (exactSeries.isNotEmpty()) {
                 exactSeries
             } else {
-                filterAndRankItems(working, rawSeries)
+                filterAndRankIndexed(working, rawSeries)
             }
             if (working.isEmpty()) return emptyList()
         }
@@ -826,9 +1082,9 @@ class LiveWallpaperRepository(
                 .map { normalize(it.removePrefix("#")) }
                 .filter { it.isNotEmpty() }
             if (normalizedSelectedTags.isNotEmpty()) {
-                working = working.mapNotNull { item ->
-                    val score = scoreSelectedTags(item, normalizedSelectedTags)
-                    if (score > 0) item to score else null
+                working = working.mapNotNull { indexed ->
+                    val score = scoreSelectedTags(indexed, normalizedSelectedTags)
+                    if (score > 0) indexed to score else null
                 }
                     .sortedByDescending { it.second }
                     .map { it.first }
@@ -840,42 +1096,37 @@ class LiveWallpaperRepository(
         val cleanedQuery = filterState.query.trim().removePrefix("#").trim()
         val collapsedQuery = normalize(cleanedQuery)
         val isAllText = collapsedQuery.isEmpty() ||
-                collapsedQuery == "hometrending" ||
-                collapsedQuery == "all"
-        if (isAllText) return working
+            collapsedQuery == "hometrending" ||
+            collapsedQuery == "all"
+        if (isAllText) return working.map { it.item }
 
         if (filterState.isColorSearch) {
             val synonyms = COLOR_SYNONYM_MAP[cleanedQuery.lowercase()]
             if (synonyms != null) {
-                val colorMatches = working.mapNotNull { item ->
-                    val score = scoreColorSynonyms(item, synonyms)
-                    if (score > 0) item to score else null
+                val normalizedSynonyms = synonyms.map { normalize(it) }.filter { it.isNotEmpty() }
+                val colorMatches = working.mapNotNull { indexed ->
+                    val score = scoreColorSynonyms(indexed, normalizedSynonyms)
+                    if (score > 0) indexed to score else null
                 }
                     .sortedByDescending { it.second }
                     .map { it.first }
-                if (colorMatches.isNotEmpty()) return colorMatches
+                if (colorMatches.isNotEmpty()) return colorMatches.map { it.item }
             }
         }
 
-        return filterAndRankItems(working, cleanedQuery)
+        return filterAndRankIndexed(working, cleanedQuery).map { it.item }
     }
 
     private fun scoreSelectedTags(
-        item: LiveWallpaperItem,
+        indexed: IndexedLiveItem,
         normalizedSelectedTags: List<String>,
     ): Int {
-        val catCollapsed = normalize(item.category.orEmpty())
-        val seriesCollapsed = normalize(item.series.orEmpty())
-        val titleCollapsed = normalize(item.title.orEmpty())
-        val slugCollapsed = normalize(item.slug.orEmpty())
-        val tagCollapsedList = item.tags.orEmpty().map { normalize(it) }.filter { it.isNotEmpty() }
-
         var totalScore = 0
         for (tagNorm in normalizedSelectedTags) {
-            val exactTagIdx = tagCollapsedList.indexOfFirst { it == tagNorm }
-            val inTitle = titleCollapsed.contains(tagNorm)
-            val inSlug = slugCollapsed.contains(tagNorm)
-            val inSeries = seriesCollapsed.contains(tagNorm)
+            val exactTagIdx = indexed.tagCollapsedList.indexOfFirst { it == tagNorm }
+            val inTitle = indexed.titleCollapsed.contains(tagNorm)
+            val inSlug = indexed.slugCollapsed.contains(tagNorm)
+            val inSeries = indexed.seriesCollapsed.contains(tagNorm)
             val score = when {
                 exactTagIdx == 0 && (inTitle || inSlug) -> 120
                 inTitle -> 110
@@ -884,9 +1135,15 @@ class LiveWallpaperRepository(
                 exactTagIdx in 1..2 -> 92 - (exactTagIdx * 2)
                 exactTagIdx > 2 -> 80
                 inSlug -> 78
-                tagCollapsedList.any { it.contains(tagNorm) } -> 72
-                catCollapsed.contains(tagNorm) -> 65
-                matchesExactSynonym(tagNorm, catCollapsed, seriesCollapsed, titleCollapsed, tagCollapsedList) -> 55
+                indexed.tagCollapsedList.any { it.contains(tagNorm) } -> 72
+                indexed.catCollapsed.contains(tagNorm) -> 65
+                matchesExactSynonym(
+                    tagNorm,
+                    indexed.catCollapsed,
+                    indexed.seriesCollapsed,
+                    indexed.titleCollapsed,
+                    indexed.tagCollapsedList,
+                ) -> 55
                 else -> 0
             }
             if (score == 0) return 0
@@ -896,25 +1153,17 @@ class LiveWallpaperRepository(
     }
 
     private fun scoreColorSynonyms(
-        item: LiveWallpaperItem,
-        synonyms: List<String>,
+        indexed: IndexedLiveItem,
+        normalizedSynonyms: List<String>,
     ): Int {
-        val catCollapsed = normalize(item.category.orEmpty())
-        val seriesCollapsed = normalize(item.series.orEmpty())
-        val titleCollapsed = normalize(item.title.orEmpty())
-        val slugCollapsed = normalize(item.slug.orEmpty())
-        val tagCollapsedList = item.tags.orEmpty().map { normalize(it) }.filter { it.isNotEmpty() }
-
         var best = 0
-        for (rawSyn in synonyms) {
-            val synNorm = normalize(rawSyn)
-            if (synNorm.isEmpty()) continue
+        for (synNorm in normalizedSynonyms) {
             val candidate = when {
-                tagCollapsedList.any { it == synNorm } -> 100
-                titleCollapsed.contains(synNorm) -> 90
-                tagCollapsedList.any { it.contains(synNorm) } -> 85
-                slugCollapsed.contains(synNorm) -> 80
-                seriesCollapsed.contains(synNorm) || catCollapsed.contains(synNorm) -> 75
+                indexed.tagCollapsedList.any { it == synNorm } -> 100
+                indexed.titleCollapsed.contains(synNorm) -> 90
+                indexed.tagCollapsedList.any { it.contains(synNorm) } -> 85
+                indexed.slugCollapsed.contains(synNorm) -> 80
+                indexed.seriesCollapsed.contains(synNorm) || indexed.catCollapsed.contains(synNorm) -> 75
                 else -> 0
             }
             if (candidate > best) best = candidate
@@ -930,23 +1179,37 @@ class LiveWallpaperRepository(
         val cleaned = rawQuery.trim().removePrefix("#").trim()
         val collapsedQuery = normalize(cleaned)
         val isAllQuery = collapsedQuery.isEmpty() ||
-                collapsedQuery == "hometrending" ||
-                collapsedQuery == "all"
+            collapsedQuery == "hometrending" ||
+            collapsedQuery == "all"
 
         if (isAllQuery) return items
+        return filterAndRankIndexed(resolveIndexedPool(items), rawQuery).map { it.item }
+    }
+
+    private fun filterAndRankIndexed(
+        pool: List<IndexedLiveItem>,
+        rawQuery: String,
+    ): List<IndexedLiveItem> {
+        val cleaned = rawQuery.trim().removePrefix("#").trim()
+        val collapsedQuery = normalize(cleaned)
+        val isAllQuery = collapsedQuery.isEmpty() ||
+            collapsedQuery == "hometrending" ||
+            collapsedQuery == "all"
+
+        if (isAllQuery) return pool
 
         if (collapsedQuery == "anime") {
-            val exactAnimeCat = items.filter { normalize(it.category.orEmpty()) == "anime" }
+            val exactAnimeCat = pool.filter { it.catCollapsed == "anime" }
             if (exactAnimeCat.isNotEmpty()) return exactAnimeCat
-            return items
+            return pool
         }
 
         val queryTokens = tokenize(cleaned)
 
         // Pass 1: Strict match (exact category/series/tag, full phrase, multi-keyword AND across title+series+tags+category+slug, or exact alias)
-        val primaryMatches = items.mapNotNull { item ->
-            val score = scoreMatch(item, collapsedQuery, queryTokens)
-            if (score > 0) item to score else null
+        val primaryMatches = pool.mapNotNull { indexed ->
+            val score = scoreMatchIndexed(indexed, collapsedQuery, queryTokens)
+            if (score > 0) indexed to score else null
         }
             .sortedByDescending { it.second }
             .map { it.first }
@@ -957,9 +1220,9 @@ class LiveWallpaperRepository(
 
         // Pass 2: Official long series-title fallback (e.g. "Frieren: Beyond Journey's End" -> series/category "Frieren")
         // Only runs when strict pass returns 0 results so multi-keyword AND queries stay precise.
-        return items.mapNotNull { item ->
-            val score = scoreSeriesFallback(item, collapsedQuery)
-            if (score > 0) item to score else null
+        return pool.mapNotNull { indexed ->
+            val score = scoreSeriesFallbackIndexed(indexed, collapsedQuery)
+            if (score > 0) indexed to score else null
         }
             .sortedByDescending { it.second }
             .map { it.first }
@@ -974,63 +1237,40 @@ class LiveWallpaperRepository(
         item: LiveWallpaperItem,
         collapsedQuery: String,
         queryTokens: List<String>,
+    ): Int = scoreMatchIndexed(buildIndexedItem(item), collapsedQuery, queryTokens)
+
+    private fun scoreMatchIndexed(
+        indexed: IndexedLiveItem,
+        collapsedQuery: String,
+        queryTokens: List<String>,
     ): Int {
-        val rawCategory = item.category.orEmpty()
-        val rawSeries = item.series.orEmpty()
-        val rawTitle = item.title.orEmpty()
-        val rawSlug = item.slug.orEmpty()
-        val rawId = item.id.orEmpty()
-        val rawTags = item.tags.orEmpty()
-
-        val catCollapsed = normalize(rawCategory)
-        val seriesCollapsed = normalize(rawSeries)
-        val titleCollapsed = normalize(rawTitle)
-        val slugCollapsed = normalize(rawSlug)
-        val idCollapsed = normalize(rawId)
-        val tagCollapsedList = rawTags.map { normalize(it) }.filter { it.isNotEmpty() }
-
         // 1. Exact category, series, or tag match (highest priority)
-        if (catCollapsed == collapsedQuery ||
-            seriesCollapsed == collapsedQuery ||
-            tagCollapsedList.any { it == collapsedQuery }
+        if (indexed.catCollapsed == collapsedQuery ||
+            indexed.seriesCollapsed == collapsedQuery ||
+            indexed.tagCollapsedList.any { it == collapsedQuery }
         ) {
             return 100
         }
 
         // 2. Direct full-query substring match in title, series, category, tags, slug, or id
-        if (titleCollapsed.contains(collapsedQuery)) return 90
-        if (seriesCollapsed.contains(collapsedQuery)) return 88
-        if (catCollapsed.contains(collapsedQuery)) return 85
-        if (tagCollapsedList.any { it.contains(collapsedQuery) }) return 80
-        if (slugCollapsed.contains(collapsedQuery) || idCollapsed.contains(collapsedQuery)) return 75
+        if (indexed.titleCollapsed.contains(collapsedQuery)) return 90
+        if (indexed.seriesCollapsed.contains(collapsedQuery)) return 88
+        if (indexed.catCollapsed.contains(collapsedQuery)) return 85
+        if (indexed.tagCollapsedList.any { it.contains(collapsedQuery) }) return 80
+        if (indexed.slugCollapsed.contains(collapsedQuery) || indexed.idCollapsed.contains(collapsedQuery)) return 75
 
         // 3. Multi-keyword AND match across combined fields (title + series + category + tags + slug)
         if (queryTokens.isNotEmpty()) {
-            val fieldTokens = HashSet<String>().apply {
-                addAll(tokenize(rawTitle))
-                addAll(tokenize(rawSeries))
-                addAll(tokenize(rawCategory))
-                addAll(tokenize(rawSlug))
-                rawTags.forEach { addAll(tokenize(it)) }
-            }
-            val combinedCollapsed = buildString {
-                append(titleCollapsed)
-                append(' ')
-                append(seriesCollapsed)
-                append(' ')
-                append(catCollapsed)
-                append(' ')
-                append(slugCollapsed)
-                tagCollapsedList.forEach {
-                    append(' ')
-                    append(it)
-                }
-            }
-
             val allTokensMatched = queryTokens.all { qTok ->
-                fieldTokens.any { fTok -> fTok.contains(qTok) } ||
-                        combinedCollapsed.contains(qTok) ||
-                        matchesExactSynonym(qTok, catCollapsed, seriesCollapsed, titleCollapsed, tagCollapsedList)
+                indexed.fieldTokens.any { fTok -> fTok.contains(qTok) } ||
+                    indexed.combinedCollapsed.contains(qTok) ||
+                    matchesExactSynonym(
+                        qTok,
+                        indexed.catCollapsed,
+                        indexed.seriesCollapsed,
+                        indexed.titleCollapsed,
+                        indexed.tagCollapsedList,
+                    )
             }
             if (allTokensMatched) {
                 return 65
@@ -1038,29 +1278,38 @@ class LiveWallpaperRepository(
         }
 
         // 4. Exact full-phrase synonym/abbreviation match (e.g., "Attack on Titan" -> "aot", "Kimetsu no Yaiba" -> "Demon Slayer")
-        if (matchesExactSynonym(collapsedQuery, catCollapsed, seriesCollapsed, titleCollapsed, tagCollapsedList)) {
+        if (matchesExactSynonym(
+                collapsedQuery,
+                indexed.catCollapsed,
+                indexed.seriesCollapsed,
+                indexed.titleCollapsed,
+                indexed.tagCollapsedList,
+            )
+        ) {
             return 60
         }
 
         return 0
     }
 
-    private fun scoreSeriesFallback(
-        item: LiveWallpaperItem,
+    private fun scoreSeriesFallbackIndexed(
+        indexed: IndexedLiveItem,
         collapsedQuery: String,
     ): Int {
-        val catCollapsed = normalize(item.category.orEmpty())
-        val seriesCollapsed = normalize(item.series.orEmpty())
-        val titleCollapsed = normalize(item.title.orEmpty())
-        val tagCollapsedList = item.tags.orEmpty().map { normalize(it) }.filter { it.isNotEmpty() }
-
-        if (seriesCollapsed.length >= 4 && collapsedQuery.contains(seriesCollapsed)) {
+        if (indexed.seriesCollapsed.length >= 4 && collapsedQuery.contains(indexed.seriesCollapsed)) {
             return 58
         }
-        if (catCollapsed.length >= 4 && collapsedQuery.contains(catCollapsed)) {
+        if (indexed.catCollapsed.length >= 4 && collapsedQuery.contains(indexed.catCollapsed)) {
             return 55
         }
-        if (matchesLooseSynonym(collapsedQuery, catCollapsed, seriesCollapsed, titleCollapsed, tagCollapsedList)) {
+        if (matchesLooseSynonym(
+                collapsedQuery,
+                indexed.catCollapsed,
+                indexed.seriesCollapsed,
+                indexed.titleCollapsed,
+                indexed.tagCollapsedList,
+            )
+        ) {
             return 45
         }
         return 0
@@ -1079,9 +1328,9 @@ class LiveWallpaperRepository(
             if (!queryInGroup) return@any false
             group.any { alias ->
                 catCollapsed.contains(alias) ||
-                        seriesCollapsed.contains(alias) ||
-                        titleCollapsed.contains(alias) ||
-                        tagCollapsedList.any { it.contains(alias) }
+                    seriesCollapsed.contains(alias) ||
+                    titleCollapsed.contains(alias) ||
+                    tagCollapsedList.any { it.contains(alias) }
             }
         }
     }
@@ -1101,9 +1350,9 @@ class LiveWallpaperRepository(
             if (!queryInGroup) return@any false
             group.any { alias ->
                 catCollapsed.contains(alias) ||
-                        seriesCollapsed.contains(alias) ||
-                        titleCollapsed.contains(alias) ||
-                        tagCollapsedList.any { it.contains(alias) }
+                    seriesCollapsed.contains(alias) ||
+                    titleCollapsed.contains(alias) ||
+                    tagCollapsedList.any { it.contains(alias) }
             }
         }
     }

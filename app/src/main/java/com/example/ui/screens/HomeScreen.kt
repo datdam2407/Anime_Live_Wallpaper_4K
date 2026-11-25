@@ -78,6 +78,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -292,10 +293,10 @@ fun HomeScreen(
                     val feedCount = currentFeedCountState.value
                     val canLoadMore = canLoadMoreState.value
                     canLoadMore &&
-                            feedCount > 0 &&
-                            totalItems > 0 &&
-                            lastVisibleIndex >= totalItems - 4 &&
-                            lastLoadMoreTriggeredAtCount != feedCount
+                        feedCount > 0 &&
+                        totalItems > 0 &&
+                        lastVisibleIndex >= totalItems - 4 &&
+                        lastLoadMoreTriggeredAtCount != feedCount
                 }
                     .distinctUntilChanged()
                     .collect { shouldTrigger ->
@@ -342,179 +343,179 @@ fun HomeScreen(
                         .fillMaxSize()
                         .testTag("home_staggered_grid"),
                 ) {
-                    item(key = "home_trending_carousel", span = StaggeredGridItemSpan.FullLine) {
-                        TrendingCarouselBanner(
-                            banners = uiState.trendingBanners,
-                            onBannerClick = { index, banner ->
-                                if (banner != null && uiState.feedStatus is FeedStatus.Success) {
-                                    val found = uiState.feedStatus.items.indexOfFirst { it.id == banner.id }
-                                    if (found >= 0) {
-                                        onOpenDetail(found)
-                                    } else {
-                                        onSelectTrendingTopic(banner.animeSeries)
-                                    }
+                item(key = "home_trending_carousel", span = StaggeredGridItemSpan.FullLine) {
+                    TrendingCarouselBanner(
+                        banners = uiState.trendingBanners,
+                        onBannerClick = { index, banner ->
+                            if (banner != null && uiState.feedStatus is FeedStatus.Success) {
+                                val found = uiState.feedStatus.items.indexOfFirst { it.id == banner.id }
+                                if (found >= 0) {
+                                    onOpenDetail(found)
                                 } else {
-                                    val topic = AnimeCatalog.trendingTopics.getOrElse(index) {
-                                        AnimeCatalog.trendingTopics.first()
-                                    }
-                                    onSelectTrendingTopic(topic.title)
+                                    onSelectTrendingTopic(banner.animeSeries)
                                 }
+                            } else {
+                                val topic = AnimeCatalog.trendingTopics.getOrElse(index) {
+                                    AnimeCatalog.trendingTopics.first()
+                                }
+                                onSelectTrendingTopic(topic.title)
+                            }
+                        },
+                    )
+                }
+
+                item(key = "home_catalog_filter_section", span = StaggeredGridItemSpan.FullLine) {
+                    val currentResultCount = (uiState.feedStatus as? FeedStatus.Success)?.items?.size
+                    if (uiState.isLiveTab) {
+                        LiveCatalogFilterSection(
+                            filterState = uiState.liveFilter,
+                            facets = uiState.liveCatalogFacets,
+                            resultCount = uiState.liveTotalCount ?: currentResultCount,
+                            onToggleCategory = { category ->
+                                focusManager.clearFocus()
+                                onToggleLiveCategory(category)
                             },
+                            onToggleTag = { tagQuery ->
+                                focusManager.clearFocus()
+                                onToggleLiveTag(tagQuery)
+                            },
+                            onClearFilter = {
+                                focusManager.clearFocus()
+                                onClearLiveFilters()
+                            },
+                            onRefresh = onRefresh,
+                        )
+                    } else {
+                        StaticCatalogFilterSection(
+                            filterState = uiState.staticFilter,
+                            hiddenEmptyCategories = uiState.hiddenEmptyStaticCategories,
+                            verifiedTags = uiState.verifiedStaticTags,
+                            tagRotationVersion = uiState.staticTagRotationVersion,
+                            onToggleCategory = { category ->
+                                focusManager.clearFocus()
+                                onToggleStaticCategory(category)
+                            },
+                            onToggleTag = { tagQuery ->
+                                focusManager.clearFocus()
+                                onToggleStaticTag(tagQuery)
+                            },
+                            onClearFilter = {
+                                focusManager.clearFocus()
+                                onClearStaticFilters()
+                            },
+                            onRefresh = onRefresh,
                         )
                     }
+                }
 
-                    item(key = "home_catalog_filter_section", span = StaggeredGridItemSpan.FullLine) {
-                        val currentResultCount = (uiState.feedStatus as? FeedStatus.Success)?.items?.size
-                        if (uiState.isLiveTab) {
-                            LiveCatalogFilterSection(
-                                filterState = uiState.liveFilter,
-                                facets = uiState.liveCatalogFacets,
-                                resultCount = uiState.liveTotalCount ?: currentResultCount,
-                                onToggleCategory = { category ->
-                                    focusManager.clearFocus()
-                                    onToggleLiveCategory(category)
-                                },
-                                onToggleTag = { tagQuery ->
-                                    focusManager.clearFocus()
-                                    onToggleLiveTag(tagQuery)
-                                },
-                                onClearFilter = {
-                                    focusManager.clearFocus()
-                                    onClearLiveFilters()
-                                },
-                                onRefresh = onRefresh,
-                            )
-                        } else {
-                            StaticCatalogFilterSection(
-                                filterState = uiState.staticFilter,
-                                hiddenEmptyCategories = uiState.hiddenEmptyStaticCategories,
-                                verifiedTags = uiState.verifiedStaticTags,
-                                tagRotationVersion = uiState.staticTagRotationVersion,
-                                onToggleCategory = { category ->
-                                    focusManager.clearFocus()
-                                    onToggleStaticCategory(category)
-                                },
-                                onToggleTag = { tagQuery ->
-                                    focusManager.clearFocus()
-                                    onToggleStaticTag(tagQuery)
-                                },
-                                onClearFilter = {
-                                    focusManager.clearFocus()
-                                    onClearStaticFilters()
-                                },
-                                onRefresh = onRefresh,
+                if (!uiState.bannerMessage.isNullOrBlank()) {
+                    item(span = StaggeredGridItemSpan.FullLine) {
+                        RateLimitBanner(message = uiState.bannerMessage)
+                    }
+                }
+
+                when (val status = uiState.feedStatus) {
+                    FeedStatus.Loading -> {
+                        val shimmerRatio = if (uiState.isLiveTab) 0.58f else 0.66f
+                        items(8) {
+                            ShimmerBox(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(shimmerRatio)
+                                    .clip(RoundedCornerShape(18.dp)),
                             )
                         }
                     }
 
-                    if (!uiState.bannerMessage.isNullOrBlank()) {
+                    is FeedStatus.Error -> {
                         item(span = StaggeredGridItemSpan.FullLine) {
-                            RateLimitBanner(message = uiState.bannerMessage)
+                            EmptyFeedCard(
+                                message = status.message,
+                                isLive = uiState.isLiveTab,
+                                onRetry = onRefresh,
+                                onBrowseAll = {
+                                    if (uiState.isLiveTab) onClearLiveFilters() else onClearStaticFilters()
+                                },
+                            )
                         }
                     }
 
-                    when (val status = uiState.feedStatus) {
-                        FeedStatus.Loading -> {
-                            val shimmerRatio = if (uiState.isLiveTab) 0.58f else 0.66f
-                            items(8) {
-                                ShimmerBox(
+                    is FeedStatus.Success -> {
+                        itemsIndexed(
+                            items = gridEntries,
+                            key = { _, entry ->
+                                when (entry) {
+                                    is WallpaperGridEntry.WallpaperItem -> entry.wallpaper.id
+                                    is WallpaperGridEntry.NativeAdSlot -> entry.slotKey
+                                }
+                            },
+                            span = { _, entry ->
+                                when (entry) {
+                                    is WallpaperGridEntry.NativeAdSlot -> StaggeredGridItemSpan.FullLine
+                                    is WallpaperGridEntry.WallpaperItem -> StaggeredGridItemSpan.SingleLane
+                                }
+                            },
+                        ) { _, entry ->
+                            when (entry) {
+                                is WallpaperGridEntry.NativeAdSlot -> {
+                                    NativeAdCard(
+                                        style = NativeAdStyle.GRID_CARD,
+                                        slotKey = entry.slotKey,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+
+                                is WallpaperGridEntry.WallpaperItem -> {
+                                    val index = entry.originalIndex
+                                    val wallpaper = entry.wallpaper
+                                    // Uniform card dimensions across each feed for clean visual alignment:
+                                    // Live Wallpapers: uniform 0.58f (9:15.5 phone portrait);
+                                    // 4K Artworks: uniform 0.66f (2:3 showcase frame).
+                                    val uniformCardRatio = if (wallpaper.isLive) 0.58f else 0.66f
+                                    val isFavorite by remember(wallpaper.id, favoriteIdsState) {
+                                        derivedStateOf { wallpaper.id in favoriteIdsState.value }
+                                    }
+                                    WallpaperStaggeredCard(
+                                        wallpaper = wallpaper,
+                                        staggeredRatio = uniformCardRatio,
+                                        isFavorite = isFavorite,
+                                        onClick = { onOpenDetail(index) },
+                                        onToggleFavorite = { onToggleFavorite(wallpaper) },
+                                    )
+                                }
+                            }
+                        }
+
+                        if (uiState.isLoadingMore || uiState.hasMore) {
+                            item(span = StaggeredGridItemSpan.FullLine) {
+                                Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .aspectRatio(shimmerRatio)
-                                        .clip(RoundedCornerShape(18.dp)),
-                                )
-                            }
-                        }
-
-                        is FeedStatus.Error -> {
-                            item(span = StaggeredGridItemSpan.FullLine) {
-                                EmptyFeedCard(
-                                    message = status.message,
-                                    isLive = uiState.isLiveTab,
-                                    onRetry = onRefresh,
-                                    onBrowseAll = {
-                                        if (uiState.isLiveTab) onClearLiveFilters() else onClearStaticFilters()
-                                    },
-                                )
-                            }
-                        }
-
-                        is FeedStatus.Success -> {
-                            itemsIndexed(
-                                items = gridEntries,
-                                key = { _, entry ->
-                                    when (entry) {
-                                        is WallpaperGridEntry.WallpaperItem -> entry.wallpaper.id
-                                        is WallpaperGridEntry.NativeAdSlot -> entry.slotKey
-                                    }
-                                },
-                                span = { _, entry ->
-                                    when (entry) {
-                                        is WallpaperGridEntry.NativeAdSlot -> StaggeredGridItemSpan.FullLine
-                                        is WallpaperGridEntry.WallpaperItem -> StaggeredGridItemSpan.SingleLane
-                                    }
-                                },
-                            ) { _, entry ->
-                                when (entry) {
-                                    is WallpaperGridEntry.NativeAdSlot -> {
-                                        NativeAdCard(
-                                            style = NativeAdStyle.GRID_CARD,
-                                            slotKey = entry.slotKey,
-                                            modifier = Modifier.fillMaxWidth(),
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (uiState.isLoadingMore) {
+                                        androidx.compose.material3.CircularProgressIndicator(
+                                            color = CrimsonBlade,
+                                            modifier = Modifier.size(28.dp),
                                         )
-                                    }
-
-                                    is WallpaperGridEntry.WallpaperItem -> {
-                                        val index = entry.originalIndex
-                                        val wallpaper = entry.wallpaper
-                                        // Uniform card dimensions across each feed for clean visual alignment:
-                                        // Live Wallpapers: uniform 0.58f (9:15.5 phone portrait);
-                                        // 4K Artworks: uniform 0.66f (2:3 showcase frame).
-                                        val uniformCardRatio = if (wallpaper.isLive) 0.58f else 0.66f
-                                        val isFavorite by remember(wallpaper.id, favoriteIdsState) {
-                                            derivedStateOf { wallpaper.id in favoriteIdsState.value }
-                                        }
-                                        WallpaperStaggeredCard(
-                                            wallpaper = wallpaper,
-                                            staggeredRatio = uniformCardRatio,
-                                            isFavorite = isFavorite,
-                                            onClick = { onOpenDetail(index) },
-                                            onToggleFavorite = { onToggleFavorite(wallpaper) },
-                                        )
-                                    }
-                                }
-                            }
-
-                            if (uiState.isLoadingMore || uiState.hasMore) {
-                                item(span = StaggeredGridItemSpan.FullLine) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 8.dp),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        if (uiState.isLoadingMore) {
-                                            androidx.compose.material3.CircularProgressIndicator(
-                                                color = CrimsonBlade,
-                                                modifier = Modifier.size(28.dp),
-                                            )
-                                        } else {
-                                            Button(
-                                                onClick = onLoadMore,
-                                                colors = ButtonDefaults.buttonColors(
-                                                    containerColor = ObsidianSurfaceElevated,
-                                                    contentColor = InkWhite,
-                                                ),
-                                                shape = RoundedCornerShape(14.dp),
-                                            ) {
-                                                Text("Load More Wallpapers")
-                                            }
+                                    } else {
+                                        Button(
+                                            onClick = onLoadMore,
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = ObsidianSurfaceElevated,
+                                                contentColor = InkWhite,
+                                            ),
+                                            shape = RoundedCornerShape(14.dp),
+                                        ) {
+                                            Text("Load More Wallpapers")
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                }
                 }
 
                 // Top-Center "Scroll to Top" Floating Action Button when deep in the feed (> 15 items)
@@ -805,8 +806,6 @@ private fun TrendingCarouselBanner(
 
     val context = LocalContext.current
     val density = LocalDensity.current
-    val bannerHeightPx = remember(density) { with(density) { 176.dp.roundToPx() } }
-    val bannerWidthPx = remember(density) { with(density) { 420.dp.roundToPx() } }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         HorizontalPager(
@@ -823,7 +822,7 @@ private fun TrendingCarouselBanner(
             val banner = banners.getOrNull(page)
             val topicTitle = AnimeCatalog.trendingTopics.getOrNull(page)?.title ?: "Trending Anime"
 
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(RoundedCornerShape(22.dp))
@@ -832,15 +831,25 @@ private fun TrendingCarouselBanner(
                     .clickable { onBannerClick(page, banner) },
             ) {
                 if (banner != null) {
-                    val bannerRequest = remember(banner.thumbnailUrl, bannerWidthPx, bannerHeightPx) {
+                    val bannerWidthPx = with(density) { maxWidth.roundToPx().coerceIn(720, 1280) }
+                    val bannerHeightPx = with(density) { maxHeight.roundToPx().coerceIn(360, 640) }
+                    val primaryBannerUrl = remember(banner.id, banner.imageUrl, banner.thumbnailUrl, banner.isLive) {
+                        banner.thumbnailUrl.ifBlank { banner.imageUrl }
+                    }
+                    var useFallbackThumb by remember(banner.id, primaryBannerUrl) { mutableStateOf(false) }
+                    val activeBannerUrl = if (useFallbackThumb && banner.imageUrl.isNotBlank()) {
+                        banner.imageUrl
+                    } else {
+                        primaryBannerUrl
+                    }
+                    val bannerRequest = remember(activeBannerUrl, bannerWidthPx, bannerHeightPx) {
                         ImageRequest.Builder(context)
-                            .data(banner.thumbnailUrl)
+                            .data(activeBannerUrl)
                             .size(bannerWidthPx, bannerHeightPx)
                             .precision(Precision.INEXACT)
                             .scale(Scale.FILL)
                             .memoryCachePolicy(CachePolicy.ENABLED)
                             .diskCachePolicy(CachePolicy.ENABLED)
-                            .allowHardware(false)
                             .crossfade(160)
                             .build()
                     }
@@ -848,6 +857,12 @@ private fun TrendingCarouselBanner(
                         model = bannerRequest,
                         contentDescription = "Trending anime banner",
                         contentScale = ContentScale.Crop,
+                        filterQuality = FilterQuality.High,
+                        onError = {
+                            if (!useFallbackThumb && banner.imageUrl.isNotBlank() && banner.imageUrl != primaryBannerUrl) {
+                                useFallbackThumb = true
+                            }
+                        },
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
@@ -905,9 +920,9 @@ private fun TrendingCarouselBanner(
                     Text(
                         text = banner?.animeSeries?.takeIf {
                             it.isNotBlank() &&
-                                    !it.equals("anime", true) &&
-                                    !it.equals("Trending Anime", true) &&
-                                    !it.equals("Hot Anime", true)
+                                !it.equals("anime", true) &&
+                                !it.equals("Trending Anime", true) &&
+                                !it.equals("Hot Anime", true)
                         } ?: topicTitle,
                         style = MaterialTheme.typography.headlineMedium,
                         color = InkWhite,

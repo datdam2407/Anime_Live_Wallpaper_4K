@@ -177,6 +177,9 @@ class LiveWallpaperR2Test {
                 if (offline) throw IOException("No internet")
                 return getLiveCatalog()
             }
+
+            override suspend fun fetchStaticCatalogCdn() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
+            override suspend fun fetchStaticCatalogRaw() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
         }
         val downloader = LiveWallpaperDownloader(
             storageRootDir = File(tempFolder.root, "live_repo_videos"),
@@ -252,6 +255,9 @@ class LiveWallpaperR2Test {
                     wallpapers = listOf(fallbackItem),
                 )
             }
+
+            override suspend fun fetchStaticCatalogCdn() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
+            override suspend fun fetchStaticCatalogRaw() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
         }
         val downloader = LiveWallpaperDownloader(
             storageRootDir = File(tempFolder.root, "live_repo_fallback"),
@@ -334,6 +340,8 @@ class LiveWallpaperR2Test {
             )
 
             override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = getLiveCatalog()
+            override suspend fun fetchStaticCatalogCdn() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
+            override suspend fun fetchStaticCatalogRaw() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
         }
         val downloader = LiveWallpaperDownloader(
             storageRootDir = File(tempFolder.root, "live_repo_search"),
@@ -595,6 +603,8 @@ class LiveWallpaperR2Test {
         val fakeApi = object : LiveCatalogApi {
             override suspend fun getLiveCatalog(): LiveCatalogResponse = parsed
             override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = parsed
+            override suspend fun fetchStaticCatalogCdn() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
+            override suspend fun fetchStaticCatalogRaw() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
         }
         val downloader = LiveWallpaperDownloader(
             storageRootDir = File(tempFolder.root, "live_repo_faceted"),
@@ -756,6 +766,8 @@ class LiveWallpaperR2Test {
             )
 
             override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = getLiveCatalog()
+            override suspend fun fetchStaticCatalogCdn() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
+            override suspend fun fetchStaticCatalogRaw() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
         }
         val downloader = LiveWallpaperDownloader(
             storageRootDir = File(tempFolder.root, "live_repo_distinct_tags"),
@@ -817,6 +829,8 @@ class LiveWallpaperR2Test {
             }
 
             override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = getLiveCatalog()
+            override suspend fun fetchStaticCatalogCdn() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
+            override suspend fun fetchStaticCatalogRaw() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
         }
         val downloader = LiveWallpaperDownloader(
             storageRootDir = File(tempFolder.root, "live_repo_refresh_shuffle"),
@@ -945,5 +959,171 @@ class LiveWallpaperR2Test {
             "Category with no scoped tags must not leak unrelated global tags",
             facets.displayTagsFor("Cars").isEmpty(),
         )
+    }
+
+    @Test
+    fun `persists live json to disk, hydrates cold start instantly with 122 anime items, and races GitHub Raw when jsDelivr stalls`() = runTest {
+        val cacheFile = File(tempFolder.root, "live_catalog_cache_v1.json")
+        val animeItems = (1..122).map { idx ->
+            val id = "anime_${idx.toString().padStart(4, '0')}"
+            LiveWallpaperItem(
+                id = id,
+                slug = "anime-live-$idx",
+                title = "Anime Live Scene $idx",
+                category = "Anime",
+                series = if (idx % 2 == 0) "One Piece" else "Naruto",
+                tags = listOf("anime", "dark", "sword"),
+                thumbUrl = "https://cdn.example.r2.dev/$id/thumb.jpg",
+                previewUrl = "https://cdn.example.r2.dev/$id/preview.mp4",
+                fullUrl = "https://cdn.example.r2.dev/$id/full.mp4",
+            )
+        }
+        val gamesItems = (1..10).map { idx ->
+            val id = "game_$idx"
+            LiveWallpaperItem(
+                id = id,
+                slug = "game-live-$idx",
+                title = "Game Live Scene $idx",
+                category = "Games",
+                series = "Genshin Impact",
+                tags = listOf("games", "neon"),
+                thumbUrl = "https://cdn.example.r2.dev/$id/thumb.jpg",
+                previewUrl = "https://cdn.example.r2.dev/$id/preview.mp4",
+                fullUrl = "https://cdn.example.r2.dev/$id/full.mp4",
+            )
+        }
+        val fullCatalog = animeItems + gamesItems
+
+        // 1. Simulate jsDelivr stalling for 10s while GitHub Raw responds immediately -> parallel race wins fast!
+        var githubMirrorUsed = false
+        val stallingPrimaryApi = object : LiveCatalogApi {
+            override suspend fun getLiveCatalog(): LiveCatalogResponse {
+                kotlinx.coroutines.delay(10_000L)
+                throw IOException("jsDelivr stalled")
+            }
+
+            override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse {
+                githubMirrorUsed = (url == LiveCatalogApi.GITHUB_RAW_FALLBACK_URL)
+                return LiveCatalogResponse(
+                    version = 1,
+                    total = fullCatalog.size,
+                    wallpapers = fullCatalog,
+                )
+            }
+
+            override suspend fun fetchStaticCatalogCdn() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
+            override suspend fun fetchStaticCatalogRaw() = retrofit2.Response.success(com.example.data.remote.StaticCatalogResponse())
+        }
+        val downloader = LiveWallpaperDownloader(
+            storageRootDir = File(tempFolder.root, "live_repo_disk_cache"),
+            downloadClient = OkHttpClient(),
+        )
+        val firstSessionRepo = LiveWallpaperRepository(
+            api = stallingPrimaryApi,
+            downloader = downloader,
+            catalogCacheFile = cacheFile,
+            fallbackHeadStartMs = 20L,
+        )
+
+        val animePage = firstSessionRepo.getLiveWallpapersPage(
+            filterState = LiveFilterState(selectedCategory = "Anime"),
+            page = 1,
+        ).getOrThrow()
+        assertTrue("Expected parallel race to switch to GitHub Raw without waiting for stalled jsDelivr", githubMirrorUsed)
+        assertEquals(122, animePage.totalCount)
+        assertEquals(LiveWallpaperRepository.DEFAULT_PAGE_SIZE, animePage.items.size)
+        assertTrue(animePage.hasMore)
+        assertTrue("Expected live catalog JSON persisted to disk cache", cacheFile.exists() && cacheFile.length() > 0L)
+
+        // 2. Cold start in a brand-new repository instance while completely offline -> hydrates instantaneously from disk!
+        val offlineApi = object : LiveCatalogApi {
+            override suspend fun getLiveCatalog(): LiveCatalogResponse = throw IOException("Offline")
+            override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = throw IOException("Offline")
+            override suspend fun fetchStaticCatalogCdn(): retrofit2.Response<com.example.data.remote.StaticCatalogResponse> = throw IOException("Offline")
+            override suspend fun fetchStaticCatalogRaw(): retrofit2.Response<com.example.data.remote.StaticCatalogResponse> = throw IOException("Offline")
+        }
+        val coldStartRepo = LiveWallpaperRepository(
+            api = offlineApi,
+            downloader = downloader,
+            catalogCacheFile = cacheFile,
+        )
+        assertTrue(coldStartRepo.hydrateFromDiskIfNeeded())
+        assertTrue(coldStartRepo.hasCatalogInMemory)
+        assertEquals(132, coldStartRepo.catalogFacets.value.totalWallpapers)
+
+        val coldAnimeSnapshot = coldStartRepo.getCachedCatalogSnapshot(
+            filterState = LiveFilterState(selectedCategory = "Anime"),
+            page = 1,
+        )!!
+        assertEquals(122, coldAnimeSnapshot.totalCount)
+        assertEquals(LiveWallpaperRepository.DEFAULT_PAGE_SIZE, coldAnimeSnapshot.items.size)
+    }
+
+    @Test
+    fun `CrossTabSearchSync propagates Anime category chip to Live tab and static cards prioritize sharp imageUrl`() {
+        // 1. User selects Anime category chip on 4K Artworks (searchInput is blank) and switches to Live Wallpapers
+        val staticAnime = com.example.domain.model.StaticFilterState(selectedCategory = "Anime")
+        val syncedToLive = com.example.domain.model.CrossTabSearchSync.syncOnTabSwitch(
+            targetIsLive = true,
+            currentLiveFilter = LiveFilterState(selectedTags = setOf("stale_tag")),
+            currentStaticFilter = staticAnime,
+            searchInput = "",
+        )
+        assertEquals("Anime", syncedToLive.liveFilter.selectedCategory)
+        assertTrue(syncedToLive.liveFilter.selectedTags.isEmpty())
+        assertEquals("Anime", syncedToLive.activeQueryForLive)
+
+        // Switching back from Live (Anime) -> 4K Artworks preserves Anime category chip
+        val syncedBackToStatic = com.example.domain.model.CrossTabSearchSync.syncOnTabSwitch(
+            targetIsLive = false,
+            currentLiveFilter = LiveFilterState(selectedCategory = "Anime"),
+            currentStaticFilter = com.example.domain.model.StaticFilterState(),
+            searchInput = "",
+            matchedExploreCategoryTitle = "Anime",
+        )
+        assertEquals("Anime", syncedBackToStatic.staticFilter.selectedCategory)
+        assertEquals("Anime", syncedBackToStatic.activeQueryForStatic)
+
+        // 2. Home Screen 4K Artworks card prioritizes lightweight thumbnailUrl first with imageUrl fallback
+        val staticArtwork = com.example.domain.model.AppWallpaper(
+            id = "wh_sharp_1",
+            title = "Gojo Sharp 4K",
+            animeSeries = "Jujutsu Kaisen",
+            imageUrl = "https://w.wallhaven.cc/full/01/sharp1.jpg",
+            thumbnailUrl = "https://th.wallhaven.cc/orig/01/sharp1.jpg",
+            videoUrl = null,
+            isLive = false,
+            width = 1440,
+            height = 2560,
+            source = "Wallhaven",
+        )
+        val staticCandidates = com.example.ui.components.resolveCardImageCandidates(staticArtwork)
+        assertEquals(4, staticCandidates.size)
+        assertEquals("https://th.wallhaven.cc/orig/01/sharp1.jpg", staticCandidates[0].first)
+        assertFalse(staticCandidates[0].second)
+        assertEquals("https://w.wallhaven.cc/full/01/sharp1.jpg", staticCandidates[1].first)
+        assertFalse(staticCandidates[1].second)
+        assertEquals("https://th.wallhaven.cc/orig/01/sharp1.jpg", staticCandidates[2].first)
+        assertTrue(staticCandidates[2].second)
+        assertEquals("https://w.wallhaven.cc/full/01/sharp1.jpg", staticCandidates[3].first)
+        assertTrue(staticCandidates[3].second)
+
+        // Live wallpaper card keeps R2 thumbnailUrl first and video frame fallbacks after
+        val liveArtwork = com.example.domain.model.AppWallpaper(
+            id = "kuro_live_1",
+            title = "Luffy Gear 5 Live",
+            animeSeries = "One Piece",
+            imageUrl = "https://cdn.example.r2.dev/live1/thumb.jpg",
+            thumbnailUrl = "https://cdn.example.r2.dev/live1/thumb.jpg",
+            videoUrl = "https://cdn.example.r2.dev/live1/full.mp4",
+            previewVideoUrl = "https://cdn.example.r2.dev/live1/preview.mp4",
+            isLive = true,
+            width = 1080,
+            height = 1920,
+            source = "Cloudflare R2",
+        )
+        val liveCandidates = com.example.ui.components.resolveCardImageCandidates(liveArtwork)
+        assertEquals("https://cdn.example.r2.dev/live1/thumb.jpg", liveCandidates[0].first)
+        assertTrue(liveCandidates.any { it.first == "https://cdn.example.r2.dev/live1/preview.mp4" })
     }
 }

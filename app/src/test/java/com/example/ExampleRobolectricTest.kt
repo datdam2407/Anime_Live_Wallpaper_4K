@@ -70,6 +70,28 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `computeVisibleCropHint and buildFitOriginalBitmap preserve native resolution without blur`() {
+        // 4K 9:16 artwork on a 9:20 phone (1080x2400): crop stays at full 3840px height (1728x3840)
+        val cropHint = BitmapCropper.computeVisibleCropHint(
+            srcWidth = 2160,
+            srcHeight = 3840,
+            screenWidth = 1080,
+            screenHeight = 2400,
+        )
+        assertEquals(1728, cropHint.width())
+        assertEquals(3840, cropHint.height())
+        assertEquals(216, cropHint.left)
+        assertEquals(0, cropHint.top)
+
+        // Fit Original preserves full 9:16 artwork on an exact 9:20 native canvas (width >= 1080)
+        val portrait2k = Bitmap.createBitmap(1440, 2560, Bitmap.Config.ARGB_8888)
+        val fitted = BitmapCropper.buildFitOriginalBitmap(portrait2k, 1080, 2400)
+        assertEquals(1440, fitted.width)
+        assertEquals(3200, fitted.height)
+        assertFalse(portrait2k.isRecycled)
+    }
+
+    @Test
     fun `live mp4 download alternates A and B files with progress and deletes previous slot`() = runTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val fakeMp4Bytes = ByteArray(24 * 1024) { (it % 127).toByte() }

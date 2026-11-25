@@ -1,6 +1,7 @@
 package com.example.ui.state
 
 import android.app.Application
+import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -11,6 +12,7 @@ import coil.imageLoader
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import coil.size.Precision
+import coil.size.Scale
 import com.example.KuroWallApplication
 import com.example.data.local.UserSettings
 import com.example.data.repository.WallpaperRepository
@@ -221,7 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 all.filter {
                     it.title.contains(trimmed, ignoreCase = true) ||
-                            it.genreTag.contains(trimmed, ignoreCase = true)
+                        it.genreTag.contains(trimmed, ignoreCase = true)
                 }
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AnimeCatalog.allTwoHundred)
@@ -242,6 +244,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 launch(Dispatchers.Default) {
                     fillMissingSearchCategoryCovers()
+                }
+            }
+        }
+        viewModelScope.launch {
+            container.staticCatalogRepository.catalogUpdates.collect { updatedItems ->
+                if (updatedItems.isEmpty()) return@collect
+                val snapshotState = _rawState.value
+                val isDefaultHome = !snapshotState.isLiveTab &&
+                    !snapshotState.staticFilter.isChipFilterActive &&
+                    snapshotState.activeQuery == WallpaperRepository.HOME_TRENDING_KEY &&
+                    snapshotState.currentPage == 1
+                if (!isDefaultHome) return@collect
+                val activeFilter = snapshotState.filter
+                val firstPage = container.staticCatalogRepository
+                    .getCachedPageSnapshot(filter = activeFilter, page = 1)
+                    .items
+                if (firstPage.isEmpty()) return@collect
+                _rawState.update { state ->
+                    val stillDefaultStaticHome = !state.isLiveTab &&
+                        !state.staticFilter.isChipFilterActive &&
+                        state.activeQuery == WallpaperRepository.HOME_TRENDING_KEY &&
+                        state.currentPage == 1 &&
+                        state.filter == activeFilter
+                    if (!stillDefaultStaticHome) return@update state
+                    val currentItems = (state.feedStatus as? FeedStatus.Success)?.items.orEmpty()
+                    if (currentItems.map { it.id } == firstPage.map { it.id }) {
+                        return@update state
+                    }
+                    state.copy(
+                        feedStatus = FeedStatus.Success(firstPage),
+                        trendingBanners = pickDistinctSeriesBanners(firstPage, limit = 10),
+                        hasMore = true,
+                        bannerMessage = null,
+                    )
                 }
             }
         }
@@ -266,6 +302,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             launch { repository.pruneExpiredCache() }
+            launch { repository.warmupStaticCatalog() }
             launch { repository.warmupLiveCatalog() }
             enqueueImageWarmup(
                 listOf(SPLASH_WALLPAPER_THUMB_URL, SPLASH_WALLPAPER_JPG_URL),
@@ -282,19 +319,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             feedJob?.join()
             _isSplashPreloadComplete.value = true
             _rawState.update { it.copy(isSplashPreloadComplete = true) }
-
-            // Stage 3: Verify Home 4K Artworks #Tags first (so only guaranteed non-empty hashtags appear),
-            // then probe explore categories & pre-warm SearchScreen category covers in the background.
-            launch {
-                val activeState = _rawState.value
-                warmVerifiedStaticTags(
-                    selectedCategory = activeState.staticFilter.selectedCategory,
-                    filter = activeState.filter,
-                    rotationSeed = activeState.staticTagRotationVersion,
-                    targetNewProbes = 6,
-                )
-                warmSearchCategoryCoverPools()
-            }
         }
     }
 
@@ -302,7 +326,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         wallhavenRateLimiter.dismissDistractionPrompt()
     }
 
-    private fun enqueueImageWarmup(urls: List<String>, widthPx: Int = 540, heightPx: Int = 960) {
+    private fun enqueueImageWarmup(
+        urls: List<String>,
+        widthPx: Int = 540,
+        heightPx: Int = 960,
+        exactPrecision: Boolean = false,
+    ) {
         val app = getApplication<Application>()
         val loader = app.imageLoader
         urls.asSequence()
@@ -313,10 +342,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val request = ImageRequest.Builder(app)
                     .data(url)
                     .size(widthPx, heightPx)
-                    .precision(Precision.INEXACT)
+                    .precision(if (exactPrecision) Precision.EXACT else Precision.INEXACT)
+                    .scale(Scale.FILL)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
-                    .allowHardware(false)
                     .build()
                 loader.enqueue(request)
             }
@@ -443,7 +472,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val matchedExploreCategory = AnimeCatalog.exploreCategories.firstOrNull {
             it.title.equals(suggestion.query, ignoreCase = true) ||
-                    it.query.equals(suggestion.query, ignoreCase = true)
+                it.query.equals(suggestion.query, ignoreCase = true)
         }
         val synced = CrossTabSearchSync.syncFromSearch(
             rawQuery = suggestion.query,
@@ -463,14 +492,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 scrollToTopSignal = state.scrollToTopSignal + 1,
             )
         }
-        if (synced.staticFilter.selectedCategory != null) {
-            warmVerifiedStaticTags(
-                selectedCategory = synced.staticFilter.selectedCategory,
-                filter = _rawState.value.filter,
-                rotationSeed = 0,
-                targetNewProbes = 6,
-            )
-        }
         loadFeed(forceRefresh = false)
     }
 
@@ -478,10 +499,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         searchDebounceJob?.cancel()
         _rawState.update { state ->
             val isSwitchingBetweenCategories = state.liveFilter.selectedCategory != null &&
-                    !state.liveFilter.selectedCategory.equals(category.trim(), ignoreCase = true)
+                !state.liveFilter.selectedCategory.equals(category.trim(), ignoreCase = true)
             val activeTag = state.liveFilter.selectedTags.firstOrNull()
             val tagExistsInNewCategory = activeTag != null &&
-                    state.liveCatalogFacets.tagsFor(category).any { it.query.equals(activeTag, ignoreCase = true) }
+                state.liveCatalogFacets.tagsFor(category).any { it.query.equals(activeTag, ignoreCase = true) }
             val nextLiveFilter = state.liveFilter.toggleCategory(
                 category = category,
                 clearTagIfSwitchingCategory = isSwitchingBetweenCategories && !tagExistsInNewCategory,
@@ -568,10 +589,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleStaticCategory(category: String) {
         searchDebounceJob?.cancel()
-        var nextCategory: String? = null
         _rawState.update { state ->
             val nextStaticFilter = state.staticFilter.toggleCategory(category)
-            nextCategory = nextStaticFilter.selectedCategory
             val cleanedLiveFilter = if (state.liveFilter.query.isNotBlank() || state.liveFilter.selectedSeries != null) {
                 LiveFilterState()
             } else {
@@ -590,12 +609,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 scrollToTopSignal = state.scrollToTopSignal + 1,
             )
         }
-        warmVerifiedStaticTags(
-            selectedCategory = nextCategory,
-            filter = _rawState.value.filter,
-            rotationSeed = 0,
-            targetNewProbes = 6,
-        )
         loadFeed(forceRefresh = false)
     }
 
@@ -637,12 +650,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 scrollToTopSignal = state.scrollToTopSignal + 1,
             )
         }
-        warmVerifiedStaticTags(
-            selectedCategory = null,
-            filter = _rawState.value.filter,
-            rotationSeed = _rawState.value.staticTagRotationVersion,
-            targetNewProbes = 6,
-        )
         loadFeed(forceRefresh = false)
     }
 
@@ -650,8 +657,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         searchDebounceJob?.cancel()
         val cleanedTopic = topic.trim().removePrefix("#").trim()
         val isResetExplicit = cleanedTopic.isEmpty() ||
-                cleanedTopic.equals("all", ignoreCase = true) ||
-                cleanedTopic.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true)
+            cleanedTopic.equals("all", ignoreCase = true) ||
+            cleanedTopic.equals(WallpaperRepository.HOME_TRENDING_KEY, ignoreCase = true)
 
         if (_rawState.value.isLiveTab) {
             if (isResetExplicit) {
@@ -737,35 +744,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         searchDebounceJob?.cancel()
-        var staticCategoryToWarm: String? = null
         _rawState.update { state ->
+            val matchedExploreCategoryTitle = if (!isLive) {
+                val liveCat = state.liveFilter.selectedCategory?.trim().orEmpty()
+                if (liveCat.isNotEmpty()) {
+                    AnimeCatalog.exploreCategories.firstOrNull {
+                        it.title.equals(liveCat, ignoreCase = true) || it.query.equals(liveCat, ignoreCase = true)
+                    }?.title
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
             val synced = CrossTabSearchSync.syncOnTabSwitch(
                 targetIsLive = isLive,
                 currentLiveFilter = state.liveFilter,
                 currentStaticFilter = state.staticFilter,
                 searchInput = state.searchInput,
                 isColorSearch = state.isActiveColorSearch,
+                matchedExploreCategoryTitle = matchedExploreCategoryTitle,
                 homeTrendingKey = WallpaperRepository.HOME_TRENDING_KEY,
             )
-            staticCategoryToWarm = synced.staticFilter.selectedCategory
+            // When switching from 4K Artworks (Category + static-only Tag) -> Live Wallpapers,
+            // gracefully relax to Category alone if the Live JSON has matches for the Category
+            // (e.g., "Anime" -> 122+ items) so switching tabs never flashes a false empty state.
+            val effectiveLiveFilter = if (isLive &&
+                liveWallpaperRepository.hasCatalogInMemory &&
+                synced.liveFilter.selectedCategory != null &&
+                synced.liveFilter.selectedTags.isNotEmpty()
+            ) {
+                val combinedCount = liveWallpaperRepository
+                    .getCachedCatalogSnapshot(synced.liveFilter, page = 1, pageSize = 1)
+                    ?.totalCount ?: 0
+                if (combinedCount > 0) {
+                    synced.liveFilter
+                } else {
+                    val categoryOnly = LiveFilterState(selectedCategory = synced.liveFilter.selectedCategory)
+                    val categoryCount = liveWallpaperRepository
+                        .getCachedCatalogSnapshot(categoryOnly, page = 1, pageSize = 1)
+                        ?.totalCount ?: 0
+                    if (categoryCount > 0) categoryOnly else synced.liveFilter
+                }
+            } else {
+                synced.liveFilter
+            }
             val scopeKey = buildStaticTagScopeKey(synced.staticFilter.selectedCategory, state.filter)
             val cachedVerified = verifiedStaticTagsByScope[scopeKey]?.values?.toList().orEmpty()
+            val resolvedActiveQuery = if (isLive) {
+                effectiveLiveFilter.displayInputText().removePrefix("#").ifEmpty { WallpaperRepository.HOME_TRENDING_KEY }
+            } else {
+                synced.activeQueryForStatic
+            }
             state.copy(
                 isLiveTab = isLive,
-                liveFilter = synced.liveFilter,
+                liveFilter = effectiveLiveFilter,
                 staticFilter = synced.staticFilter,
                 verifiedStaticTags = if (!isLive) cachedVerified else state.verifiedStaticTags,
-                activeQuery = if (isLive) synced.activeQueryForLive else synced.activeQueryForStatic,
+                activeQuery = resolvedActiveQuery,
                 searchSuggestions = emptyList(),
                 scrollToTopSignal = state.scrollToTopSignal + 1,
-            )
-        }
-        if (!isLive) {
-            warmVerifiedStaticTags(
-                selectedCategory = staticCategoryToWarm,
-                filter = _rawState.value.filter,
-                rotationSeed = _rawState.value.staticTagRotationVersion,
-                targetNewProbes = 6,
             )
         }
         loadFeed(forceRefresh = false)
@@ -831,13 +869,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (filterChanged) {
             searchCoverWarmupJob?.cancel()
-            warmVerifiedStaticTags(
-                selectedCategory = activeStaticCategory,
-                filter = newFilter,
-                rotationSeed = 0,
-                targetNewProbes = 6,
-            )
-            warmSearchCategoryCoverPools(forceReprobe = true)
         }
         loadFeed(forceRefresh = false)
     }
@@ -861,16 +892,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 bannerMessage = null,
                 staticTagRotationVersion = nextRotation,
                 scrollToTopSignal = it.scrollToTopSignal + 1,
-            )
-        }
-        if (!isLive) {
-            // Probe a small fresh batch (max 3) in the background so pull-to-refresh reveals new
-            // API-verified hashtags without risking Wallhaven's 45 req/min rate limit.
-            warmVerifiedStaticTags(
-                selectedCategory = current.staticFilter.selectedCategory,
-                filter = current.filter,
-                rotationSeed = nextRotation,
-                targetNewProbes = 3,
             )
         }
         loadFeed(forceRefresh = true)
@@ -1021,14 +1042,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 scrollToTopSignal = state.scrollToTopSignal + 1,
             )
         }
-        if (synced.staticFilter.selectedCategory != null) {
-            warmVerifiedStaticTags(
-                selectedCategory = synced.staticFilter.selectedCategory,
-                filter = _rawState.value.filter,
-                rotationSeed = 0,
-                targetNewProbes = 6,
-            )
-        }
         loadFeed(forceRefresh = false)
     }
 
@@ -1060,7 +1073,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun requestAnimeCategoryPreviews(visibleCategories: List<AnimeCategory>) {
         if (visibleCategories.isEmpty()) return
         val activeFilter = _rawState.value.filter
-        viewModelScope.launch {
+
+        // Cancel pending preview job if the user keeps scrolling rapidly
+        categoryPreviewJob?.cancel()
+        categoryPreviewJob = viewModelScope.launch {
             // Phase 1: Instant local hydration from Room + R2 cache (0 network calls)
             for (category in visibleCategories) {
                 val existing = _animeCategoryPreviews.value[category.id]
@@ -1071,8 +1087,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // Phase 2: Parallel throttled fetch (up to 3 visible rows concurrently) without
-            // cancelling already-in-flight row loads when the user scrolls slightly.
+            // Wait briefly for scrolling to settle before firing network calls
+            delay(250L)
+
+            // Phase 2: Throttled network fetch only for visible uncached categories
             for (category in visibleCategories) {
                 val current = _animeCategoryPreviews.value[category.id]
                 if (current != null && current.thumbnailUrls.size >= 4 && current.totalCount > 4 && !current.isLoading) {
@@ -1084,30 +1102,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (current == null || current.thumbnailUrls.isEmpty()) {
                     _animeCategoryPreviews.update { map ->
                         map + (
-                                category.id to AnimeSeriesPreview(
-                                    categoryId = category.id,
-                                    isLoading = true,
-                                )
-                                )
+                            category.id to AnimeSeriesPreview(
+                                categoryId = category.id,
+                                isLoading = true,
+                            )
+                        )
                     }
                 }
                 launch {
                     try {
-                        categoryPreviewSemaphore.acquire()
-                        val fetched = try {
-                            repository.fetchAnimeCategoryPreview(category, activeFilter)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            current?.copy(isLoading = false)
-                                ?: AnimeSeriesPreview(categoryId = category.id, isLoading = false)
-                        }
-                        _animeCategoryPreviews.update { map -> map + (category.id to fetched) }
-                        if (fetched.thumbnailUrls.isNotEmpty()) {
-                            enqueueImageWarmup(fetched.thumbnailUrls, widthPx = 240, heightPx = 420)
+                        categoryPreviewSemaphore.withPermit {
+                            val fetched = try {
+                                repository.fetchAnimeCategoryPreview(category, activeFilter)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                current?.copy(isLoading = false)
+                                    ?: AnimeSeriesPreview(categoryId = category.id, isLoading = false)
+                            }
+                            _animeCategoryPreviews.update { map -> map + (category.id to fetched) }
+                            if (fetched.thumbnailUrls.isNotEmpty()) {
+                                enqueueImageWarmup(fetched.thumbnailUrls, widthPx = 240, heightPx = 420)
+                            }
                         }
                     } finally {
-                        categoryPreviewSemaphore.release()
                         inFlightCategoryPreviewIds.remove(category.id)
                     }
                 }
@@ -1128,7 +1146,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val initialItems = preview?.wallpapers.orEmpty()
         val initialTotal = maxOf(preview?.totalCount ?: 0, initialItems.size)
         val initialHasMore = initialItems.isNotEmpty() &&
-                (initialItems.size < initialTotal || initialItems.size >= 18)
+            (initialItems.size < initialTotal || initialItems.size >= 18)
 
         _collectionDetailState.value = CollectionDetailState(
             category = category,
@@ -1153,7 +1171,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val loadedItems = fetched.wallpapers
                 val resolvedTotal = maxOf(fetched.totalCount, loadedItems.size)
                 val hasMore = loadedItems.isNotEmpty() &&
-                        (loadedItems.size < resolvedTotal || loadedItems.size >= 18)
+                    (loadedItems.size < resolvedTotal || loadedItems.size >= 18)
                 _collectionDetailState.update { state ->
                     if (state.category?.id != category.id) return@update state
                     state.copy(
@@ -1366,7 +1384,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     if (state.filter != activeFilter) return@update state
                                     state.copy(
                                         hiddenEmptyStaticCategories = state.hiddenEmptyStaticCategories +
-                                                topic.title.lowercase(),
+                                            topic.title.lowercase(),
                                     )
                                 }
                             } else if (probe.coverUrls.isNotEmpty()) {
@@ -1535,6 +1553,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadMoreJob?.cancel()
         feedJob?.cancel()
         feedJob = viewModelScope.launch {
+            // Ultra-fast <2ms Live Wallpapers in-memory path:
+            // When live_wallpapers_v1.json is already hydrated in RAM (disk cache or prefetched CDN),
+            // filter purely in memory on Dispatchers.Default with ZERO network/Room blocking.
+            if (current.isLiveTab && !forceRefresh && activeLiveFilter != null && liveWallpaperRepository.hasCatalogInMemory) {
+                val fastSnapshot = withContext(Dispatchers.Default) {
+                    liveWallpaperRepository.getCachedCatalogSnapshot(
+                        filterState = activeLiveFilter,
+                        page = 1,
+                        pageSize = com.example.data.repository.LiveWallpaperRepository.DEFAULT_PAGE_SIZE,
+                    )
+                }
+                if (fastSnapshot != null) {
+                    if (fastSnapshot.items.isNotEmpty()) {
+                        _rawState.update { state ->
+                            state.copy(
+                                feedStatus = FeedStatus.Success(fastSnapshot.items),
+                                liveTotalCount = fastSnapshot.totalCount,
+                                bannerMessage = null,
+                                isRefreshing = false,
+                                currentPage = 1,
+                                hasMore = fastSnapshot.hasMore,
+                                isLoadingMore = false,
+                            )
+                        }
+                        return@launch
+                    }
+                    // If a synced Category + static-only Tag returned 0 in Live JSON, relax to Category alone.
+                    if (activeLiveFilter.selectedCategory != null && activeLiveFilter.selectedTags.isNotEmpty()) {
+                        val relaxedFilter = LiveFilterState(selectedCategory = activeLiveFilter.selectedCategory)
+                        val relaxedSnapshot = withContext(Dispatchers.Default) {
+                            liveWallpaperRepository.getCachedCatalogSnapshot(
+                                filterState = relaxedFilter,
+                                page = 1,
+                                pageSize = com.example.data.repository.LiveWallpaperRepository.DEFAULT_PAGE_SIZE,
+                            )
+                        }
+                        if (relaxedSnapshot != null && relaxedSnapshot.items.isNotEmpty()) {
+                            _rawState.update { state ->
+                                state.copy(
+                                    liveFilter = relaxedFilter,
+                                    activeQuery = relaxedFilter.displayInputText().ifEmpty { WallpaperRepository.HOME_TRENDING_KEY },
+                                    feedStatus = FeedStatus.Success(relaxedSnapshot.items),
+                                    liveTotalCount = relaxedSnapshot.totalCount,
+                                    bannerMessage = null,
+                                    isRefreshing = false,
+                                    currentPage = 1,
+                                    hasMore = relaxedSnapshot.hasMore,
+                                    isLoadingMore = false,
+                                )
+                            }
+                            return@launch
+                        }
+                    }
+                }
+            }
+
             val localSnapshot = repository.getCachedWallpapersSnapshot(
                 query = current.activeQuery,
                 isLive = current.isLiveTab,
@@ -1643,6 +1717,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         "Live tab loaded ${resolvedItems.size} items (filter=${current.liveFilter.cacheKey()}, warning=${result.warningMessage})",
                     )
                 }
+                if (resolvedItems.isEmpty() &&
+                    activeLiveFilter != null &&
+                    activeLiveFilter.selectedCategory != null &&
+                    activeLiveFilter.selectedTags.isNotEmpty() &&
+                    liveWallpaperRepository.hasCatalogInMemory
+                ) {
+                    val relaxedFilter = LiveFilterState(selectedCategory = activeLiveFilter.selectedCategory)
+                    val relaxedSnapshot = withContext(Dispatchers.Default) {
+                        liveWallpaperRepository.getCachedCatalogSnapshot(
+                            filterState = relaxedFilter,
+                            page = 1,
+                            pageSize = com.example.data.repository.LiveWallpaperRepository.DEFAULT_PAGE_SIZE,
+                        )
+                    }
+                    if (relaxedSnapshot != null && relaxedSnapshot.items.isNotEmpty()) {
+                        _rawState.update { state ->
+                            state.copy(
+                                liveFilter = relaxedFilter,
+                                activeQuery = relaxedFilter.displayInputText().ifEmpty { WallpaperRepository.HOME_TRENDING_KEY },
+                                feedStatus = FeedStatus.Success(relaxedSnapshot.items),
+                                liveTotalCount = relaxedSnapshot.totalCount,
+                                bannerMessage = null,
+                                isRefreshing = false,
+                                currentPage = 1,
+                                hasMore = relaxedSnapshot.hasMore,
+                                isLoadingMore = false,
+                            )
+                        }
+                        return@launch
+                    }
+                }
             }
 
             // Auto-hide empty static categories or hashtags confirmed by API (HTTP 200 with 0 items)
@@ -1699,7 +1804,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _rawState.update { state ->
                     state.copy(
                         hiddenEmptyStaticCategories = state.hiddenEmptyStaticCategories +
-                                emptySelectedStaticCategory.lowercase(),
+                            emptySelectedStaticCategory.lowercase(),
                         staticFilter = StaticFilterState(),
                         activeQuery = WallpaperRepository.HOME_TRENDING_KEY,
                         isRefreshing = false,
@@ -1763,15 +1868,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         wallpapers: List<AppWallpaper>,
     ) {
         if (snapshotState.isLiveTab || wallpapers.isEmpty()) return
-        val bannerUrls = pickDistinctSeriesBanners(wallpapers, limit = 6).map { it.thumbnailUrl }
-        val cardUrls = wallpapers.take(8).map { it.thumbnailUrl }
-        enqueueImageWarmup(bannerUrls + cardUrls)
-        if (!startupPrefetchStarted && snapshotState.activeQuery == WallpaperRepository.HOME_TRENDING_KEY) {
-            startupPrefetchStarted = true
-            launch {
-                repository.prefetchTrendingQueueBatch(filter = snapshotState.filter, page = 2)
-            }
-        }
+        val metrics = getApplication<Application>().resources.displayMetrics
+        val density = metrics.density.coerceAtLeast(1f)
+        val gridHorizontalPaddingPx = (44f * density).toInt()
+        val cardWidthPx = ((metrics.widthPixels - gridHorizontalPaddingPx) / 2).coerceIn(480, 960)
+        val cardHeightPx = (cardWidthPx / 0.66f).toInt().coerceIn(640, 1440)
+        val bannerWidthPx = (metrics.widthPixels - (56f * density).toInt()).coerceIn(720, 1280)
+        val bannerHeightPx = (176f * density).toInt().coerceIn(360, 640)
+
+        val bannerUrls = pickDistinctSeriesBanners(wallpapers, limit = 6)
+            .map { it.thumbnailUrl.ifBlank { it.imageUrl } }
+        val cardUrls = wallpapers.take(10)
+            .map { it.thumbnailUrl.ifBlank { it.imageUrl } }
+
+        enqueueImageWarmup(
+            urls = bannerUrls,
+            widthPx = bannerWidthPx,
+            heightPx = bannerHeightPx,
+            exactPrecision = false,
+        )
+        enqueueImageWarmup(
+            urls = cardUrls,
+            widthPx = cardWidthPx,
+            heightPx = cardHeightPx,
+            exactPrecision = false,
+        )
     }
 
     private fun pickDistinctSeriesBanners(
@@ -1799,7 +1920,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setStaticWallpaper(wallpaper: AppWallpaper, target: WallpaperTarget) {
+    fun setStaticWallpaper(
+        wallpaper: AppWallpaper,
+        target: WallpaperTarget,
+        scaleMode: com.example.domain.model.WallpaperScaleMode = com.example.domain.model.WallpaperScaleMode.CENTER_CROP,
+    ) {
         if (_rawState.value.isProcessingAction) return
         viewModelScope.launch {
             _rawState.update {
@@ -1813,6 +1938,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 imageUrl = wallpaper.imageUrl,
                 target = target,
                 fallbackThumbnailUrl = wallpaper.thumbnailUrl,
+                scaleMode = scaleMode,
                 onProgress = { percent, statusLabel ->
                     _rawState.update { state ->
                         state.copy(

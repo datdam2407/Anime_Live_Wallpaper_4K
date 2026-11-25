@@ -68,3 +68,11 @@ enum class WallpaperTarget(val label: String) {
     LOCK("Lock Screen"),
     BOTH("Home & Lock Screen"),
 }
+
+enum class WallpaperScaleMode(
+    val label: String,
+    val subtitle: String,
+) {
+    CENTER_CROP("Fill Screen", "Matches preview • Exact screen-aspect crop"),
+    FIT_ORIGINAL("Fit Full Image", "Zero edge crop • Keeps 100% of artwork"),
+}

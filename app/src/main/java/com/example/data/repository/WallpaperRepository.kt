@@ -86,6 +86,7 @@ class WallpaperRepository(
     private val wallhavenRateLimiter: WallhavenRateLimiter = WallhavenRateLimiter(),
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val liveWallpaperRepository: LiveWallpaperRepository? = null,
+    private val staticCatalogRepository: StaticCatalogRepository? = null,
 ) {
     companion object {
         private const val TAG = "WallpaperRepository"
@@ -241,7 +242,16 @@ class WallpaperRepository(
         }
         val effectiveStatic = if (!isLive) staticFilter?.takeIf { it.isChipFilterActive } else null
         if (!isLive && effectiveStatic == null && normalizedQuery == HOME_TRENDING_KEY) {
-            val (batchTopics, topicPage) = resolveTrendingBatch(page) ?: return@withContext emptyList()
+            val r2Slice = staticCatalogRepository?.getCachedPageSnapshot(filter = filter, page = page)
+            if (r2Slice != null && r2Slice.items.isNotEmpty()) {
+                return@withContext r2Slice.items
+            }
+            val wallhavenPage = if (r2Slice != null && r2Slice.isBeyondCatalog) {
+                (page - r2Slice.pageCount).coerceAtLeast(1)
+            } else {
+                page
+            }
+            val (batchTopics, topicPage) = resolveTrendingBatch(wallhavenPage) ?: return@withContext emptyList()
             val perTopicLists = batchTopics.map { topic ->
                 val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
                 wallpaperDao.getCachedWallpapers(topicCacheKey).map { it.toDomain() }
@@ -288,6 +298,27 @@ class WallpaperRepository(
         }
         val effectiveStatic = if (!isLive) staticFilter?.takeIf { it.isChipFilterActive } else null
         if (!isLive && effectiveStatic == null && normalizedQuery == HOME_TRENDING_KEY) {
+            val r2Repo = staticCatalogRepository
+            if (r2Repo != null) {
+                val r2Slice = r2Repo.getCachedPageSnapshot(filter = filter, page = page)
+                if (r2Slice.items.isNotEmpty()) {
+                    return@withContext r2Repo.isCacheFresh()
+                }
+                if (r2Slice.isBeyondCatalog) {
+                    val wallhavenPage = (page - r2Slice.pageCount).coerceAtLeast(1)
+                    val (batchTopics, topicPage) = resolveTrendingBatch(wallhavenPage) ?: return@withContext false
+                    return@withContext batchTopics.all { topic ->
+                        val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
+                        isCacheFreshAndEligible(
+                            cacheKey = topicCacheKey,
+                            query = topic.title,
+                            sort = filter.sort,
+                            isLive = false,
+                            forceRefresh = false,
+                        ) && wallpaperDao.getCachedWallpapers(topicCacheKey).isNotEmpty()
+                    }
+                }
+            }
             val (batchTopics, topicPage) = resolveTrendingBatch(page) ?: return@withContext false
             return@withContext batchTopics.all { topic ->
                 val topicCacheKey = buildCacheKey(topic.title, isLive = false, filter = filter, page = topicPage)
@@ -339,6 +370,20 @@ class WallpaperRepository(
 
     suspend fun warmupLiveCatalog() = withContext(Dispatchers.IO) {
         liveWallpaperRepository?.fetchLiveWallpapers(forceRefresh = false)
+    }
+
+    suspend fun warmupStaticCatalog() = withContext(Dispatchers.IO) {
+        staticCatalogRepository?.warmup()
+    }
+
+    suspend fun fetchWallpapersJson(forceRefresh: Boolean = false): String {
+        val repo = staticCatalogRepository
+            ?: error("StaticCatalogRepository is not configured on WallpaperRepository.")
+        return repo.fetchWallpapersJson(forceRefresh = forceRefresh)
+    }
+
+    fun observeStaticCatalogUpdates(): Flow<List<AppWallpaper>> {
+        return staticCatalogRepository?.catalogUpdates ?: flowOf(emptyList())
     }
 
     /**
@@ -404,6 +449,7 @@ class WallpaperRepository(
                 page = 1,
                 skipRedditUnlessNeeded = true,
                 staticFilter = categoryFilter,
+                priority = WallhavenRateLimiter.RequestPriority.BACKGROUND_PREFETCH,
             )
             val fetchedUrls = fetched.wallpapers
                 .mapNotNull { it.thumbnailUrl.takeIf(String::isNotBlank) }
@@ -515,6 +561,7 @@ class WallpaperRepository(
             page = 1,
             skipRedditUnlessNeeded = true,
             staticFilter = tagFilter,
+            priority = WallhavenRateLimiter.RequestPriority.BACKGROUND_PREFETCH,
         )
         if (fetched.wallpapers.isNotEmpty()) {
             val count = maxOf(fetched.totalCount ?: 0, fetched.wallpapers.size)
@@ -588,7 +635,7 @@ class WallpaperRepository(
     ): AnimeSeriesPreview = withContext(Dispatchers.IO) {
         val cached = getCachedAnimeCategoryPreview(category, filter)
         val hasKnownTotal = seriesTotalCounts.containsKey(category.query.lowercase()) ||
-                seriesTotalCounts.containsKey(category.title.lowercase())
+            seriesTotalCounts.containsKey(category.title.lowercase())
         if (cached != null && cached.wallpapers.size >= 4 && (hasKnownTotal || cached.totalCount >= 12)) {
             return@withContext cached
         }
@@ -605,6 +652,7 @@ class WallpaperRepository(
                 filter = filter,
                 page = 1,
                 cacheKey = cacheKey,
+                priority = WallhavenRateLimiter.RequestPriority.BACKGROUND_PREFETCH,
             )
             pageResult.wallpapers.forEach { wp -> collectedById.putIfAbsent(wp.id, wp) }
             resolvedTotal = maxOf(resolvedTotal, pageResult.totalCount, collectedById.size)
@@ -717,8 +765,9 @@ class WallpaperRepository(
         filter: WallpaperFilter,
         page: Int,
         cacheKey: String,
+        priority: WallhavenRateLimiter.RequestPriority = WallhavenRateLimiter.RequestPriority.USER_INTERACTIVE,
     ): CollectionPageResult {
-        return when (wallhavenRateLimiter.tryAcquire()) {
+        return when (wallhavenRateLimiter.tryAcquire(priority)) {
             is WallhavenRateLimiter.AcquireResult.RateLimited -> {
                 CollectionPageResult(
                     wallpapers = emptyList(),
@@ -755,7 +804,7 @@ class WallpaperRepository(
                     page == 1 &&
                     filter.ratio == RatioFilter.PORTRAIT_MOBILE &&
                     wallhavenRateLimiter.remainingQuota() > 12 &&
-                    wallhavenRateLimiter.tryAcquire() is WallhavenRateLimiter.AcquireResult.Allowed
+                    wallhavenRateLimiter.tryAcquire(priority) is WallhavenRateLimiter.AcquireResult.Allowed
                 ) {
                     val broaderOutcome = safeApiCall("Wallhaven/CategoryPage-portrait") {
                         wallhavenApi.searchAnime(
@@ -889,6 +938,32 @@ class WallpaperRepository(
                 forceRefresh = forceRefresh,
                 liveFilter = liveFilter,
             )
+        }
+
+        // Primary Home Screen feed: prioritize GitHub Raw / Cloudflare R2 static JSON
+        // (RAM + Disk cache on Dispatchers.IO), using Wallhaven only for fallback or expansion.
+        if (effectiveStatic == null && normalizedQuery == HOME_TRENDING_KEY && staticCatalogRepository != null) {
+            val r2Page = staticCatalogRepository.getHomePage(
+                filter = filter,
+                page = page,
+                forceRefresh = forceRefresh,
+            )
+            if (r2Page.items.isNotEmpty()) {
+                return@withContext WallpaperFetchResult(
+                    wallpapers = r2Page.items,
+                    isFromCache = r2Page.isFromCache,
+                    hasMore = true,
+                    totalCount = r2Page.totalCount,
+                )
+            }
+            if (r2Page.isBeyondCatalog) {
+                val expansionPage = (page - r2Page.pageCount).coerceAtLeast(1)
+                return@withContext fetchQueuedTrendingBatch(
+                    filter = filter,
+                    page = expansionPage,
+                    forceRefresh = false,
+                )
+            }
         }
 
         if (forceRefresh && page == 1) {
@@ -1233,7 +1308,7 @@ class WallpaperRepository(
             perTopicResults.firstNotNullOfOrNull { it.second.warningMessage }
         }
         val canLoadMoreQueue = page < queueBatches.size ||
-                (!anyRateLimited && perTopicResults.any { it.second.hasMore })
+            (!anyRateLimited && perTopicResults.any { it.second.hasMore })
 
         WallpaperFetchResult(
             wallpapers = interleaved,
@@ -1271,6 +1346,7 @@ class WallpaperRepository(
         page: Int,
         skipRedditUnlessNeeded: Boolean = false,
         staticFilter: StaticFilterState? = null,
+        priority: WallhavenRateLimiter.RequestPriority = WallhavenRateLimiter.RequestPriority.USER_INTERACTIVE,
     ): WallpaperFetchResult {
         var createdRef: Deferred<WallpaperFetchResult>? = null
         val deferred = inFlightMutex.withLock {
@@ -1288,6 +1364,7 @@ class WallpaperRepository(
                             page = page,
                             skipRedditUnlessNeeded = skipRedditUnlessNeeded,
                             staticFilter = staticFilter,
+                            priority = priority,
                         )
                     } finally {
                         withContext(NonCancellable) {
@@ -1346,6 +1423,7 @@ class WallpaperRepository(
         page: Int,
         skipRedditUnlessNeeded: Boolean = false,
         staticFilter: StaticFilterState? = null,
+        priority: WallhavenRateLimiter.RequestPriority = WallhavenRateLimiter.RequestPriority.USER_INTERACTIVE,
     ): WallpaperFetchResult = coroutineScope {
         val activeStaticChip = staticFilter?.takeIf { it.isChipFilterActive }
         val isHomeTrending = activeStaticChip == null && query == HOME_TRENDING_KEY
@@ -1399,7 +1477,7 @@ class WallpaperRepository(
         var retryAfterSec = 0L
 
         val wallhavenTask = async<ApiCallOutcome<WallhavenResponse>?> {
-            when (val decision = wallhavenRateLimiter.tryAcquire()) {
+            when (val decision = wallhavenRateLimiter.tryAcquire(priority)) {
                 is WallhavenRateLimiter.AcquireResult.RateLimited -> {
                     localQuotaLimited = true
                     retryAfterSec = ((decision.retryAfterMs + 999L) / 1000L).coerceAtLeast(1L)
@@ -1453,7 +1531,7 @@ class WallpaperRepository(
 
         var wallhavenOutcome = wallhavenTask.await()
         var rateLimited = localQuotaLimited ||
-                (wallhavenOutcome is ApiCallOutcome.HttpFailure && wallhavenOutcome.code == 429)
+            (wallhavenOutcome is ApiCallOutcome.HttpFailure && wallhavenOutcome.code == 429)
         var wallhavenBody = (wallhavenOutcome as? ApiCallOutcome.Success)?.response?.body()
         var wallhavenItems = wallhavenBody?.data.orEmpty()
 
@@ -1464,7 +1542,7 @@ class WallpaperRepository(
             page == 1 &&
             filter.ratio == RatioFilter.PORTRAIT_MOBILE &&
             wallhavenRateLimiter.remainingQuota() > 10 &&
-            wallhavenRateLimiter.tryAcquire() is WallhavenRateLimiter.AcquireResult.Allowed
+            wallhavenRateLimiter.tryAcquire(priority) is WallhavenRateLimiter.AcquireResult.Allowed
         ) {
             val broaderOutcome = safeApiCall("Wallhaven/portrait-fallback") {
                 wallhavenApi.searchAnime(
@@ -1523,14 +1601,14 @@ class WallpaperRepository(
         val wallhavenSucceeded = wallhavenOutcome is ApiCallOutcome.Success
         val redditSucceeded = redditResponses.isNotEmpty()
         val wallhavenHardError = (wallhavenOutcome is ApiCallOutcome.NetworkFailure) ||
-                (wallhavenOutcome is ApiCallOutcome.HttpFailure && wallhavenOutcome.code != 429)
+            (wallhavenOutcome is ApiCallOutcome.HttpFailure && wallhavenOutcome.code != 429)
         // Only treat the request as a server/connection outage if NO upstream source succeeded.
         // Secondary Reddit 403/429 responses must never trigger a false "Unable to reach wallpaper servers"
         // error when Wallhaven already responded cleanly with HTTP 200.
         val hadNetworkOrHttpError = !wallhavenSucceeded && !redditSucceeded && (
-                wallhavenHardError ||
-                        redditOutcomes.any { it is ApiCallOutcome.NetworkFailure || it is ApiCallOutcome.HttpFailure }
-                )
+            wallhavenHardError ||
+                redditOutcomes.any { it is ApiCallOutcome.NetworkFailure || it is ApiCallOutcome.HttpFailure }
+            )
 
         val combined = mutableListOf<AppWallpaper>()
         val displaySeries = when {
@@ -1933,11 +2011,11 @@ class WallpaperRepository(
         val cleanPostUrl = sanitizeHttpsUrl(post.url)
         val lowerUrl = cleanPostUrl?.lowercase()?.substringBefore("?").orEmpty()
         val isDirectImageHost = lowerUrl.endsWith(".jpg") ||
-                lowerUrl.endsWith(".jpeg") ||
-                lowerUrl.endsWith(".png") ||
-                lowerUrl.endsWith(".webp") ||
-                lowerUrl.contains("i.redd.it/") ||
-                lowerUrl.contains("i.imgur.com/")
+            lowerUrl.endsWith(".jpeg") ||
+            lowerUrl.endsWith(".png") ||
+            lowerUrl.endsWith(".webp") ||
+            lowerUrl.contains("i.redd.it/") ||
+            lowerUrl.contains("i.imgur.com/")
 
         val previewSourceUrl = sanitizeHttpsUrl(previewSource?.url)
 

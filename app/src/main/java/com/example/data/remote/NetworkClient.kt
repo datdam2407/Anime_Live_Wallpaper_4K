@@ -62,6 +62,9 @@ object NetworkClient {
         cacheFolderName: String,
         maxAgeHours: Int,
         includeJsonHeaders: Boolean = true,
+        connectTimeoutSec: Long = 20L,
+        readTimeoutSec: Long = 25L,
+        writeTimeoutSec: Long = 20L,
     ): OkHttpClient {
         val appContext = context.applicationContext
         val cacheDir = File(appContext.cacheDir, cacheFolderName)
@@ -71,7 +74,7 @@ object NetworkClient {
             val builder = chain.request().newBuilder()
                 .header("User-Agent", APP_USER_AGENT)
             if (includeJsonHeaders) {
-                builder.header("Accept", "application/json")
+                builder.header("Accept", "application/json, text/plain, */*")
             }
             chain.proceed(builder.build())
         }
@@ -145,19 +148,29 @@ object NetworkClient {
             .addInterceptor(offlineInterceptor)
             .addNetworkInterceptor(onlineInterceptor)
             .addInterceptor(logging)
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
+            .connectTimeout(connectTimeoutSec, TimeUnit.SECONDS)
+            .readTimeout(readTimeoutSec, TimeUnit.SECONDS)
+            .writeTimeout(writeTimeoutSec, TimeUnit.SECONDS)
             .build()
     }
 
     /**
-     * Live Wallpaper catalog client backed by jsDelivr CDN (2h online disk cache, 7d offline fallback).
+     * Live Wallpaper catalog client backed by jsDelivr CDN / GitHub Raw mirror
+     * with snappy 8s/12s timeouts, 2h online disk cache, and 7d offline fallback.
      */
     fun createLiveCatalogApi(context: Context): LiveCatalogApi {
         return Retrofit.Builder()
             .baseUrl(JSDELIVR_BASE_URL)
-            .client(buildCachedOkHttp(context, "live_catalog_cache", maxAgeHours = 2))
+            .client(
+                buildCachedOkHttp(
+                    context = context,
+                    cacheFolderName = "live_catalog_cache",
+                    maxAgeHours = 2,
+                    connectTimeoutSec = 8L,
+                    readTimeoutSec = 12L,
+                    writeTimeoutSec = 8L,
+                ),
+            )
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(LiveCatalogApi::class.java)

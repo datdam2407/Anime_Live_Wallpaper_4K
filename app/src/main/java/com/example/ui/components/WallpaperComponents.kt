@@ -1,6 +1,5 @@
 package com.example.ui.components
 
-import android.graphics.Bitmap
 import android.util.Log
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -64,6 +63,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -155,8 +155,53 @@ fun PremiumGoldBadge(
 }
 
 /**
- * Staggered Grid card that strictly loads thumbnailUrl (never full 4K imageUrl)
- * with ContentScale.Crop to prevent OOM and keep scrolling fluid.
+ * Builds the ordered image load candidate list (`url to bypassDiskCache`) for a Home grid card:
+ * - Static 4K Artworks (`!isLive`): prioritizes lightweight [AppWallpaper.thumbnailUrl] first for
+ *   fast scrolling and low RAM/bandwidth, falling back to [AppWallpaper.imageUrl] if needed.
+ * - Live Wallpapers (`isLive`): keeps high-res R2 [AppWallpaper.thumbnailUrl] first, then falls back
+ *   to video frame extraction from preview/full MP4.
+ */
+internal fun resolveCardImageCandidates(wallpaper: AppWallpaper): List<Pair<String, Boolean>> = buildList {
+    if (!wallpaper.isLive) {
+        val thumbUrl = wallpaper.thumbnailUrl.trim()
+        val fullUrl = wallpaper.imageUrl.trim()
+        if (thumbUrl.isNotBlank()) {
+            add(thumbUrl to false)
+        }
+        if (fullUrl.isNotBlank() && fullUrl != thumbUrl) {
+            add(fullUrl to false)
+        }
+        if (thumbUrl.isNotBlank()) {
+            add(thumbUrl to true)
+        }
+        if (fullUrl.isNotBlank() && fullUrl != thumbUrl) {
+            add(fullUrl to true)
+        }
+    } else {
+        val thumbUrl = wallpaper.thumbnailUrl.trim()
+        if (thumbUrl.isNotBlank()) {
+            add(thumbUrl to false)
+            add(thumbUrl to true)
+        }
+        wallpaper.effectivePreviewVideoUrl
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it != thumbUrl }
+            ?.let { add(it to false) }
+        wallpaper.videoUrl
+            ?.trim()
+            ?.takeIf {
+                it.isNotBlank() &&
+                    it != thumbUrl &&
+                    it != wallpaper.effectivePreviewVideoUrl?.trim()
+            }
+            ?.let { add(it to false) }
+    }
+}
+
+/**
+ * Staggered Grid card that decodes crisp artwork to exact native card pixel dimensions
+ * (ARGB_8888, Precision.EXACT for static 4K artworks) to eliminate Home Screen blur while
+ * bounding bitmap memory and keeping scrolling fluid.
  */
 @Composable
 fun WallpaperStaggeredCard(
@@ -171,40 +216,19 @@ fun WallpaperStaggeredCard(
     val shape = RoundedCornerShape(18.dp)
 
     val density = LocalDensity.current
-    var isLoading by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableStateOf(true) }
-    var fallbackStage by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableIntStateOf(0) }
-    var fallbackFailed by remember(wallpaper.id, wallpaper.thumbnailUrl) { mutableStateOf(false) }
+    var isLoading by remember(wallpaper.id, wallpaper.imageUrl, wallpaper.thumbnailUrl) { mutableStateOf(true) }
+    var fallbackStage by remember(wallpaper.id, wallpaper.imageUrl, wallpaper.thumbnailUrl) { mutableIntStateOf(0) }
+    var fallbackFailed by remember(wallpaper.id, wallpaper.imageUrl, wallpaper.thumbnailUrl) { mutableStateOf(false) }
 
-    // Ordered candidate chain for cross-device resilience (including Xiaomi MIUI/HyperOS):
-    // Grid cards strictly load lightweight thumbnails (never raw 4K/8K imageUrl) for fast scroll & low RAM.
-    // 0: thumbnailUrl (normal cache)
-    // 1: thumbnailUrl (bypass potentially corrupt disk cache)
-    // 2+: previewVideoUrl / videoUrl frame extraction (for live wallpapers only)
     val loadCandidates = remember(
         wallpaper.id,
+        wallpaper.imageUrl,
         wallpaper.thumbnailUrl,
         wallpaper.effectivePreviewVideoUrl,
         wallpaper.videoUrl,
         wallpaper.isLive,
     ) {
-        buildList {
-            if (wallpaper.thumbnailUrl.isNotBlank()) {
-                add(wallpaper.thumbnailUrl to false)
-                add(wallpaper.thumbnailUrl to true)
-            }
-            if (wallpaper.isLive) {
-                wallpaper.effectivePreviewVideoUrl
-                    ?.takeIf { it.isNotBlank() && it != wallpaper.thumbnailUrl }
-                    ?.let { add(it to false) }
-                wallpaper.videoUrl
-                    ?.takeIf {
-                        it.isNotBlank() &&
-                                it != wallpaper.thumbnailUrl &&
-                                it != wallpaper.effectivePreviewVideoUrl
-                    }
-                    ?.let { add(it to false) }
-            }
-        }
+        resolveCardImageCandidates(wallpaper)
     }
     val currentCandidate = loadCandidates.getOrNull(fallbackStage)
     val activeUrl = currentCandidate?.first.orEmpty()
@@ -215,9 +239,9 @@ fun WallpaperStaggeredCard(
     // so the user clearly sees the full scene & subject from the Home grid while keeping uniform card sizes.
     val isWideStaticArtwork = remember(wallpaper.isLive, wallpaper.width, wallpaper.height) {
         !wallpaper.isLive &&
-                wallpaper.width > 0 &&
-                wallpaper.height > 0 &&
-                (wallpaper.width.toFloat() / wallpaper.height.toFloat()) > 1.2f
+            wallpaper.width > 0 &&
+            wallpaper.height > 0 &&
+            (wallpaper.width.toFloat() / wallpaper.height.toFloat()) > 1.2f
     }
     val portraitFramingAlignment = remember { BiasAlignment(0f, -0.25f) }
 
@@ -237,19 +261,25 @@ fun WallpaperStaggeredCard(
             .clickable(onClick = onClick)
             .testTag("wallpaper_card_${wallpaper.id}"),
     ) {
-        val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(240, 960) }
-        val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(320, 1280) }
-        val imageRequest = remember(activeUrl, bypassDiskCache, targetWidthPx, targetHeightPx, isWideStaticArtwork) {
+        val targetWidthPx = with(density) { maxWidth.roundToPx().coerceIn(480, 960) }
+        val targetHeightPx = with(density) { maxHeight.roundToPx().coerceIn(640, 1440) }
+        val imageRequest = remember(
+            activeUrl,
+            bypassDiskCache,
+            targetWidthPx,
+            targetHeightPx,
+            isWideStaticArtwork,
+        ) {
             ImageRequest.Builder(context)
                 .data(activeUrl)
                 .size(targetWidthPx, targetHeightPx)
                 .precision(Precision.INEXACT)
                 .scale(if (isWideStaticArtwork) Scale.FIT else Scale.FILL)
+                .bitmapConfig(android.graphics.Bitmap.Config.ARGB_8888)
+                .allowHardware(false)
                 .memoryCachePolicy(if (bypassDiskCache) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED)
                 .diskCachePolicy(if (bypassDiskCache) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED)
-                .bitmapConfig(Bitmap.Config.ARGB_8888)
-                .allowHardware(false)
-                .crossfade(180)
+                .crossfade(160)
                 .build()
         }
 
@@ -300,16 +330,15 @@ fun WallpaperStaggeredCard(
                 contentDescription = "${wallpaper.title} wallpaper thumbnail",
                 contentScale = if (isWideStaticArtwork) ContentScale.Fit else ContentScale.Crop,
                 alignment = if (isWideStaticArtwork) Alignment.Center else portraitFramingAlignment,
+                filterQuality = FilterQuality.High,
                 onSuccess = { isLoading = false },
                 onError = { errorState ->
-                    if (wallpaper.isLive) {
-                        runCatching {
-                            Log.e(
-                                "LIVE_DEBUG",
-                                "Grid image load failed stage=$fallbackStage id=${wallpaper.id} url=$activeUrl",
-                                errorState.result.throwable,
-                            )
-                        }
+                    runCatching {
+                        Log.e(
+                            "COIL_IMAGE_ERROR",
+                            "Grid image load failed stage=$fallbackStage id=${wallpaper.id} live=${wallpaper.isLive} bypassCache=$bypassDiskCache url=$activeUrl",
+                            errorState.result.throwable,
+                        )
                     }
                     if (fallbackStage + 1 < loadCandidates.size) {
                         fallbackStage += 1

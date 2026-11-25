@@ -3,14 +3,17 @@ package com.example.data.remote
 import com.kuroanimelivewallpapers.app.BuildConfig
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import okhttp3.ConnectionPool
 import okhttp3.ConnectionSpec
 import okhttp3.Dispatcher
 import okhttp3.Dns
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
+import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.util.concurrent.TimeUnit
@@ -95,26 +98,60 @@ object NetworkModule {
     val mediaOkHttpClient: OkHttpClient by lazy {
         val mediaDispatcher = Dispatcher().apply {
             maxRequests = 64
-            maxRequestsPerHost = 12
+            maxRequestsPerHost = 10
         }
         val mediaHeaderInterceptor = Interceptor { chain ->
             val original = chain.request()
             val builder = original.newBuilder()
                 .header("User-Agent", MEDIA_USER_AGENT)
             if (original.header("Accept") == null) {
-                builder.header("Accept", "image/webp,image/jpeg,image/png,image/*,*/*;q=0.8")
+                builder.header("Accept", "image/avif,image/webp,image/apng,image/jpeg,image/png,image/*,*/*;q=0.8")
             }
             chain.proceed(builder.build())
         }
+        val transientGetRetryInterceptor = Interceptor { chain ->
+            val request = chain.request()
+            if (!request.method.equals("GET", ignoreCase = true)) {
+                return@Interceptor chain.proceed(request)
+            }
+            var attempt = 0
+            var lastError: IOException? = null
+            while (attempt < 2) {
+                attempt += 1
+                try {
+                    val response = chain.proceed(request)
+                    val retryableHttp = response.code in setOf(429, 502, 503, 504)
+                    if (!retryableHttp || attempt >= 2) {
+                        return@Interceptor response
+                    }
+                    response.close()
+                } catch (io: IOException) {
+                    lastError = io
+                    if (attempt >= 2) throw io
+                }
+                try {
+                    Thread.sleep(220L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw lastError ?: IOException("Interrupted during media retry")
+                }
+            }
+            throw lastError ?: IOException("Media request failed")
+        }
         OkHttpClient.Builder()
             .dispatcher(mediaDispatcher)
+            .connectionPool(ConnectionPool(16, 30, TimeUnit.SECONDS))
+            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
             .dns(Ipv4PreferredDns)
             .connectionSpecs(tlsConnectionSpecs)
+            .followRedirects(true)
+            .followSslRedirects(true)
             .retryOnConnectionFailure(true)
             .connectTimeout(25, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .addInterceptor(mediaHeaderInterceptor)
+            .addInterceptor(transientGetRetryInterceptor)
             .addInterceptor(createLoggingInterceptor())
             .build()
     }

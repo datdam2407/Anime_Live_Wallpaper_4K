@@ -246,8 +246,8 @@ private fun KuroWallAppRoot(
                     }
                     val mailtoUri = Uri.parse(
                         "mailto:${Uri.encode(event.targetEmail)}" +
-                                "?subject=${Uri.encode(subject)}" +
-                                "&body=${Uri.encode(body)}",
+                            "?subject=${Uri.encode(subject)}" +
+                            "&body=${Uri.encode(body)}",
                     )
                     val emailIntent = Intent(Intent.ACTION_SENDTO, mailtoUri).apply {
                         putExtra(Intent.EXTRA_EMAIL, arrayOf(event.targetEmail))
@@ -373,7 +373,7 @@ private fun KuroWallAppRoot(
                         ) {
                             topDestinations.forEach { dest ->
                                 val selected = currentDestination?.hasRoute(dest.route::class) == true ||
-                                        (dest.route == SettingsRoute && currentDestination?.hasRoute<FavoritesRoute>() == true)
+                                    (dest.route == SettingsRoute && currentDestination?.hasRoute<FavoritesRoute>() == true)
                                 NavigationBarItem(
                                     selected = selected,
                                     onClick = { navigateTopLevel(dest.route) },
@@ -417,7 +417,7 @@ private fun KuroWallAppRoot(
                     ) {
                         topDestinations.forEach { dest ->
                             val selected = currentDestination?.hasRoute(dest.route::class) == true ||
-                                    (dest.route == SettingsRoute && currentDestination?.hasRoute<FavoritesRoute>() == true)
+                                (dest.route == SettingsRoute && currentDestination?.hasRoute<FavoritesRoute>() == true)
                             NavigationRailItem(
                                 selected = selected,
                                 onClick = { navigateTopLevel(dest.route) },
@@ -591,6 +591,9 @@ private fun KuroWallAppRoot(
                             composable<SettingsRoute> {
                                 val settings by viewModel.settings.collectAsStateWithLifecycle()
                                 val favorites by viewModel.favorites.collectAsStateWithLifecycle()
+                                LaunchedEffect(consentManager) {
+                                    consentManager.refreshPrivacyOptionsStatus()
+                                }
                                 SettingsScreen(
                                     settings = settings,
                                     savedCount = favorites.size,
@@ -600,23 +603,8 @@ private fun KuroWallAppRoot(
                                         }
                                     },
                                     onResolutionSelected = viewModel::updatePreferredResolution,
-                                    onMuteLiveToggled = viewModel::setMuteLiveWallpaper,
-                                    onOpenLiveWallpaperChooser = {
-                                        if (LiveWallpaperHelper.hasSelectedLiveWallpaper(
-                                                context = context,
-                                                activeLiveWallpaperPath = settings.activeLiveWallpaperPath,
-                                            )
-                                        ) {
-                                            launchAlternatingLiveWallpaperPicker()
-                                        } else {
-                                            viewModel.selectTab(true)
-                                            viewModel.notifySelectLiveWallpaperFirst()
-                                            navigateTopLevel(HomeRoute, forceScrollToTop = true)
-                                        }
-                                    },
-                                    onClearDownloadedLiveVideos = viewModel::clearDownloadedLiveVideos,
                                     onSubmitWallpaperRequest = viewModel::submitWallpaperRequest,
-                                    showPrivacyOptionsButton = isPrivacyOptionsRequired || consentManager.isPrivacyOptionsRequired,
+                                    showPrivacyOptionsButton = isPrivacyOptionsRequired,
                                     onOpenPrivacyOptions = {
                                         activity?.let { act ->
                                             consentManager.showPrivacyOptionsForm(act) { formError ->

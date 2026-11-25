@@ -40,9 +40,9 @@ class GoogleMobileAdsConsentManager(
 
     val isPrivacyOptionsRequired: Boolean
         get() = consentInformation.privacyOptionsRequirementStatus ==
-                ConsentInformation.PrivacyOptionsRequirementStatus.REQUIRED
+            ConsentInformation.PrivacyOptionsRequirementStatus.REQUIRED
 
-    private fun refreshPrivacyOptionsStatus() {
+    fun refreshPrivacyOptionsStatus() {
         _privacyOptionsRequired.value = isPrivacyOptionsRequired
     }
 

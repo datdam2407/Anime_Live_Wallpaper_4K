@@ -67,18 +67,18 @@ class DelogoEffect(
             val prd = product.lowercase()
             val hw = hardware.lowercase()
             return fp.startsWith("generic") ||
-                    fp.startsWith("unknown") ||
-                    fp.contains("emulator") ||
-                    mdl.contains("google_sdk") ||
-                    mdl.contains("emulator") ||
-                    mdl.contains("android sdk built for") ||
-                    mfg.contains("genymotion") ||
-                    (brd.startsWith("generic") && dev.startsWith("generic")) ||
-                    prd.contains("sdk_gphone") ||
-                    prd.contains("emulator") ||
-                    prd.contains("simulator") ||
-                    hw.contains("goldfish") ||
-                    hw.contains("ranchu")
+                fp.startsWith("unknown") ||
+                fp.contains("emulator") ||
+                mdl.contains("google_sdk") ||
+                mdl.contains("emulator") ||
+                mdl.contains("android sdk built for") ||
+                mfg.contains("genymotion") ||
+                (brd.startsWith("generic") && dev.startsWith("generic")) ||
+                prd.contains("sdk_gphone") ||
+                prd.contains("emulator") ||
+                prd.contains("simulator") ||
+                hw.contains("goldfish") ||
+                hw.contains("ranchu")
         }
 
         /**

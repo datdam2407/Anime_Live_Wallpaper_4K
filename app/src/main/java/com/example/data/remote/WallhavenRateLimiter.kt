@@ -32,6 +32,11 @@ class WallhavenRateLimiter(
     private val defaultCooldownMillis: Long = DEFAULT_COOLDOWN_MILLIS,
     private val clock: () -> Long = ::defaultMonotonicClock,
 ) {
+    enum class RequestPriority {
+        USER_INTERACTIVE,
+        BACKGROUND_PREFETCH,
+    }
+
     companion object {
         const val DISTRACTION_REQUEST_THRESHOLD = 40
         const val DEFAULT_MAX_REQUESTS_PER_MINUTE = 43
@@ -42,6 +47,7 @@ class WallhavenRateLimiter(
         const val REFRESH_NETWORK_COOLDOWN_MILLIS = 15_000L
         const val REFRESH_MIN_QUOTA_HEADROOM = 12
         const val MAX_REFRESH_NETWORK_REQUESTS_PER_MINUTE = 8
+        const val BACKGROUND_MIN_QUOTA_HEADROOM = 15
 
         /**
          * Monotonic clock immune to NTP sync or user wall-clock changes.
@@ -53,13 +59,13 @@ class WallhavenRateLimiter(
 
         private val ANIME_BREATHER_FACTS: List<Pair<String, String>> = listOf(
             "Did you know?" to
-                    "In Jujutsu Kaisen, Gojo's Six Eyes frames were animated at ultra-high keyframe density—giving our 4K servers a quick breather keeps your feed silky smooth!",
+                "In Jujutsu Kaisen, Gojo's Six Eyes frames were animated at ultra-high keyframe density—giving our 4K servers a quick breather keeps your feed silky smooth!",
             "Taking a quick breather…" to
-                    "Makoto Shinkai's background artists paint cloud layers at 4K+ resolution before compositing light rays. Pausing a few seconds keeps Wallhaven's 45 req/min gate happy!",
+                "Makoto Shinkai's background artists paint cloud layers at 4K+ resolution before compositing light rays. Pausing a few seconds keeps Wallhaven's 45 req/min gate happy!",
             "Did you know?" to
-                    "Frieren: Beyond Journey's End recorded real acoustic folk instruments in reverberant halls for its soundtrack. Your next batch of 4K artworks is lining up!",
+                "Frieren: Beyond Journey's End recorded real acoustic folk instruments in reverberant halls for its soundtrack. Your next batch of 4K artworks is lining up!",
             "Katana cooldown…" to
-                    "Ufotable blends hand-drawn 2D sword arcs with custom 3D camera shaders in Demon Slayer. Catching our breath for a moment prevents server rate-limiting!",
+                "Ufotable blends hand-drawn 2D sword arcs with custom 3D camera shaders in Demon Slayer. Catching our breath for a moment prevents server rate-limiting!",
         )
     }
 
@@ -95,7 +101,9 @@ class WallhavenRateLimiter(
         _distractionPrompt.value = null
     }
 
-    suspend fun tryAcquire(): AcquireResult {
+    suspend fun tryAcquire(
+        priority: RequestPriority = RequestPriority.USER_INTERACTIVE,
+    ): AcquireResult {
         while (true) {
             var spacingDelayMs = 0L
             mutex.withLock {
@@ -114,6 +122,16 @@ class WallhavenRateLimiter(
                     val waitMs = (oldest + windowMillis) - now
                     return AcquireResult.RateLimited(
                         retryAfterMs = waitMs.coerceAtLeast(1_000L),
+                        fromServer429 = false,
+                    )
+                }
+
+                val remaining = maxRequestsPerWindow - requestTimestamps.size
+                if (priority == RequestPriority.BACKGROUND_PREFETCH &&
+                    remaining <= BACKGROUND_MIN_QUOTA_HEADROOM
+                ) {
+                    return AcquireResult.RateLimited(
+                        retryAfterMs = 5_000L,
                         fromServer429 = false,
                     )
                 }

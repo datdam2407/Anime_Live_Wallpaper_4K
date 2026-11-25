@@ -12,6 +12,7 @@ class KuroWallApplication : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        container.prefetchCatalogsOnStartup()
         // MobileAds.initialize() and ad preloading are intentionally deferred until
         // GoogleMobileAdsConsentManager finishes the UMP GDPR/CCPA check in MainActivity.
     }

@@ -399,10 +399,10 @@ object AnimeCatalog {
         if (normalized.isEmpty()) return null
         return exploreCategories.firstOrNull { topic ->
             topic.title.equals(normalized, ignoreCase = true) ||
-                    topic.query.equals(normalized, ignoreCase = true)
+                topic.query.equals(normalized, ignoreCase = true)
         } ?: trendingTopics.firstOrNull { topic ->
             topic.title.equals(normalized, ignoreCase = true) ||
-                    topic.query.equals(normalized, ignoreCase = true)
+                topic.query.equals(normalized, ignoreCase = true)
         }
     }
 }

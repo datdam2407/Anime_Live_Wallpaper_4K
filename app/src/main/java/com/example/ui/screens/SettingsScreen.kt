@@ -23,17 +23,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
-import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.HighQuality
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsNone
-import androidx.compose.material.icons.rounded.PlayCircleOutline
 import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.SupportAgent
-import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,12 +38,9 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -87,9 +80,6 @@ fun SettingsScreen(
     savedCount: Int = 0,
     onOpenSaved: () -> Unit = {},
     onResolutionSelected: (ResolutionTier) -> Unit,
-    onMuteLiveToggled: (Boolean) -> Unit,
-    onOpenLiveWallpaperChooser: () -> Unit,
-    onClearDownloadedLiveVideos: () -> Unit = {},
     onSubmitWallpaperRequest: (email: String, content: String) -> Unit = { _, _ -> },
     showPrivacyOptionsButton: Boolean = false,
     onOpenPrivacyOptions: () -> Unit = {},
@@ -265,138 +255,6 @@ fun SettingsScreen(
                                 ),
                             )
                         }
-                    }
-                }
-            }
-
-            // Live Wallpaper Engine Card
-            Surface(
-                color = ObsidianSurfaceElevated,
-                shape = RoundedCornerShape(20.dp),
-                border = BorderStroke(1.dp, HairlineBorder),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(modifier = Modifier.padding(18.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Rounded.PlayCircleOutline,
-                            contentDescription = null,
-                            tint = ElectricViolet,
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "ExoPlayer Live Engine",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = InkWhite,
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onMuteLiveToggled(!settings.muteLiveWallpaper) }
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.VolumeOff,
-                                contentDescription = null,
-                                tint = InkMuted,
-                                modifier = Modifier.size(20.dp),
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = "Mute Live Wallpaper Audio",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = InkWhite,
-                                )
-                                Text(
-                                    text = "Keep home screen silent during loops",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = InkMuted,
-                                )
-                            }
-                        }
-                        Switch(
-                            checked = settings.muteLiveWallpaper,
-                            onCheckedChange = onMuteLiveToggled,
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = InkWhite,
-                                checkedTrackColor = CrimsonBlade,
-                            ),
-                            modifier = Modifier.testTag("settings_mute_switch"),
-                        )
-                    }
-
-                    if (!settings.activeLiveWallpaperTitle.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "ACTIVE LOOP: ${settings.activeLiveWallpaperTitle}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = CyberCyan,
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Button(
-                        onClick = onOpenLiveWallpaperChooser,
-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricViolet),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("open_live_wallpaper_service"),
-                    ) {
-                        Text("Launch System Live Wallpaper Picker", color = InkWhite)
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    OutlinedButton(
-                        onClick = onClearDownloadedLiveVideos,
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, HairlineBorder),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("clear_downloaded_live_videos_button"),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.DeleteSweep,
-                            contentDescription = null,
-                            tint = CyberCyan,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Clear Unused Live Video Cache", color = InkWhite)
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Info,
-                            contentDescription = null,
-                            tint = CyberCyan.copy(alpha = 0.85f),
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = stringResource(id = R.string.live_wallpaper_keep_installed_note),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = InkMuted,
-                        )
                     }
                 }
             }

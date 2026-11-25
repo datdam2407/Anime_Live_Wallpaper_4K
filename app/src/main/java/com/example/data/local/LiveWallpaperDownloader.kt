@@ -172,7 +172,7 @@ class LiveWallpaperDownloader(
         var deletedCount = 0
         storageDir.listFiles()?.forEach { file ->
             val shouldKeep = (keepByIdName != null && file.name == keepByIdName) ||
-                    (keepByPathName != null && file.name == keepByPathName)
+                (keepByPathName != null && file.name == keepByPathName)
             if (!shouldKeep && file.delete()) {
                 deletedCount++
             }

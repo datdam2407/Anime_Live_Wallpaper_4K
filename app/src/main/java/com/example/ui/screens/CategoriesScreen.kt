@@ -172,17 +172,17 @@ fun CategoriesScreen(
             }
     }
 
-    // Observe visible viewport rows (plus 2 lookahead) to load 4-panel thumbnail previews safely.
+    // Observe visible viewport rows (plus 1 lookahead) to load 4-panel thumbnail previews safely.
     LaunchedEffect(gridState, gridEntries) {
         snapshotFlow {
             val visibleIndices = gridState.layoutInfo.visibleItemsInfo.map { it.index }
             if (visibleIndices.isEmpty()) {
                 gridEntries.filterIsInstance<CategoryGridEntry.CategoryItem>()
-                    .take(6)
+                    .take(4)
                     .map { it.category }
             } else {
                 val first = visibleIndices.min()
-                val last = (visibleIndices.max() + 2).coerceAtMost(gridEntries.lastIndex)
+                val last = (visibleIndices.max() + 1).coerceAtMost(gridEntries.lastIndex)
                 (first..last).mapNotNull { idx ->
                     (gridEntries.getOrNull(idx) as? CategoryGridEntry.CategoryItem)?.category
                 }
@@ -191,7 +191,7 @@ fun CategoriesScreen(
             .distinctUntilChanged()
             .collectLatest { visibleCategories ->
                 if (visibleCategories.isNotEmpty()) {
-                    delay(80L)
+                    delay(300L)
                     onVisibleCategoriesChanged(visibleCategories)
                 }
             }
@@ -474,7 +474,6 @@ private fun AnimeCollectionStripRow(
                                 .scale(Scale.FILL)
                                 .memoryCachePolicy(CachePolicy.ENABLED)
                                 .diskCachePolicy(CachePolicy.ENABLED)
-                                .allowHardware(false)
                                 .crossfade(220)
                                 .build()
                         }

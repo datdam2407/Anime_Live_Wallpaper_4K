@@ -63,7 +63,8 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
-  // Do not remove or modify these signingConfigs.
+  // Do not remove or modify these signingConfigs. They are necessary for building, installing,
+  // and updating Android apps in AI Studio.
   signingConfigs {
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
@@ -92,6 +93,7 @@ android {
       buildConfigField("String", "ADMOB_INTERSTITIAL_AD_UNIT_ID", "\"$releaseAdMobInterstitialId\"")
       buildConfigField("String", "ADMOB_NATIVE_AD_UNIT_ID", "\"$releaseAdMobNativeId\"")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
+      // AI Studio.
       signingConfig = signingConfigs.getByName("release")
     }
     debug {
@@ -101,7 +103,8 @@ android {
       buildConfigField("String", "ADMOB_INTERSTITIAL_AD_UNIT_ID", "\"$testAdMobInterstitialId\"")
       buildConfigField("String", "ADMOB_NATIVE_AD_UNIT_ID", "\"$testAdMobNativeId\"")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
-    //  signingConfig = signingConfigs.getByName("debugConfig")
+      // AI Studio.
+     // signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
   compileOptions {

@@ -29,7 +29,9 @@ import com.example.domain.model.SortOption
 import com.example.domain.model.WallpaperFilter
 import java.io.File
 import java.io.IOException
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.ResponseBody.Companion.toResponseBody
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -510,7 +512,7 @@ class WallpaperRepositoryTest {
     }
 
     @Test
-    fun `cache expiry policy enforces 4h default TTL and 12h toplist TTL with offline fallback`() = runTest {
+    fun `cache expiry policy enforces 12h default and toplist TTL with offline fallback`() = runTest {
         var currentTimeMillis = 1_000_000_000L
         val wallhavenCalls = AtomicInteger(0)
         var failNetwork = false
@@ -576,29 +578,25 @@ class WallpaperRepositoryTest {
         assertFalse(toplistFirst.isFromCache)
         assertEquals(2, wallhavenCalls.get())
 
-        // 2. Advance 3h 59m: both Latest (4h TTL) and Toplist (12h TTL) must serve from Room with 0 API calls
-        currentTimeMillis += TimeUnit.HOURS.toMillis(3) + TimeUnit.MINUTES.toMillis(59)
+        // 2. Advance 11h 59m: both Latest (12h TTL) and Toplist (12h TTL) must serve from Room with 0 API calls
+        currentTimeMillis += TimeUnit.HOURS.toMillis(11) + TimeUnit.MINUTES.toMillis(59)
         assertTrue(repo.isFeedCacheFresh("Naruto", isLive = false, filter = latestFilter))
+        assertTrue(repo.isFeedCacheFresh("Naruto", isLive = false, filter = toplistFilter))
         assertTrue(repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = latestFilter).isFromCache)
         assertTrue(repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = toplistFilter).isFromCache)
         assertEquals(2, wallhavenCalls.get())
 
-        // 3. Advance past 4h (at 5h total): Latest expires & fetches fresh data, while Toplist (12h TTL) stays cached
-        currentTimeMillis += TimeUnit.HOURS.toMillis(1) + TimeUnit.MINUTES.toMillis(2)
+        // 3. Advance past 12h (at 12h 01m total): Latest expires & fetches fresh data
+        currentTimeMillis += TimeUnit.MINUTES.toMillis(2)
         assertFalse(repo.isFeedCacheFresh("Naruto", isLive = false, filter = latestFilter))
-        assertTrue(repo.isFeedCacheFresh("Naruto", isLive = false, filter = toplistFilter))
+        assertFalse(repo.isFeedCacheFresh("Naruto", isLive = false, filter = toplistFilter))
 
         val latestRefreshed = repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = latestFilter)
         assertFalse(latestRefreshed.isFromCache)
         assertEquals(3, wallhavenCalls.get())
         assertEquals("wh_item_3", latestRefreshed.wallpapers.first().id)
 
-        val toplistStillCached = repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = toplistFilter)
-        assertTrue(toplistStillCached.isFromCache)
-        assertEquals(3, wallhavenCalls.get())
-
-        // 4. Advance past 12h while offline: expired Toplist refresh fails network -> preserves & returns Room cache
-        currentTimeMillis += TimeUnit.HOURS.toMillis(8)
+        // 4. While offline past 12h: expired Toplist refresh fails network -> preserves & returns Room cache
         failNetwork = true
         val offlineResult = repo.refreshWallpapersIfNeeded("Naruto", isLive = false, filter = toplistFilter)
         assertTrue(offlineResult.isFromCache)
@@ -626,6 +624,8 @@ class WallpaperRepositoryTest {
             }
 
             override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = getLiveCatalog()
+            override suspend fun fetchStaticCatalogCdn() = Response.success(com.example.data.remote.StaticCatalogResponse())
+            override suspend fun fetchStaticCatalogRaw() = Response.success(com.example.data.remote.StaticCatalogResponse())
         }
         val liveRepo = LiveWallpaperRepository(
             api = fakeLiveApi,
@@ -1313,5 +1313,337 @@ class WallpaperRepositoryTest {
         val rotated1 = com.example.ui.components.rotateVerifiedTagChips(verified, rotationSeed = 1)
         assertEquals(listOf("Cyberpunk", "Dark", "Samurai", "Sakura"), rotated0.map { it.query })
         assertEquals(listOf("Sakura", "Cyberpunk", "Dark", "Samurai"), rotated1.map { it.query })
+    }
+
+    @Test
+    fun `WallhavenRateLimiter blocks BACKGROUND_PREFETCH when remaining quota is at or below 15 while allowing USER_INTERACTIVE`() = kotlinx.coroutines.runBlocking {
+        var nowMs = 100_000L
+        val limiter = com.example.data.remote.WallhavenRateLimiter(
+            maxRequestsPerWindow = 43,
+            minSpacingMillis = 0L,
+            clock = { nowMs },
+        )
+
+        // Default feed TTL is 12 hours to maximize Room cache hit rate
+        assertEquals(
+            java.util.concurrent.TimeUnit.HOURS.toMillis(12),
+            CacheExpiryPolicy.DEFAULT_FEED_TTL_MILLIS,
+        )
+
+        // Consume 27 requests -> remaining = 16 (> 15) -> BACKGROUND_PREFETCH still allowed
+        repeat(27) {
+            val result = limiter.tryAcquire(com.example.data.remote.WallhavenRateLimiter.RequestPriority.USER_INTERACTIVE)
+            assertTrue(result is com.example.data.remote.WallhavenRateLimiter.AcquireResult.Allowed)
+        }
+        assertEquals(16, limiter.remainingQuota())
+        val bgAllowed = limiter.tryAcquire(com.example.data.remote.WallhavenRateLimiter.RequestPriority.BACKGROUND_PREFETCH)
+        assertTrue(bgAllowed is com.example.data.remote.WallhavenRateLimiter.AcquireResult.Allowed)
+
+        // Now remaining = 15 (<= 15) -> BACKGROUND_PREFETCH must be blocked, USER_INTERACTIVE still allowed
+        assertEquals(15, limiter.remainingQuota())
+        val bgBlocked = limiter.tryAcquire(com.example.data.remote.WallhavenRateLimiter.RequestPriority.BACKGROUND_PREFETCH)
+        assertTrue(bgBlocked is com.example.data.remote.WallhavenRateLimiter.AcquireResult.RateLimited)
+        assertEquals(5_000L, (bgBlocked as com.example.data.remote.WallhavenRateLimiter.AcquireResult.RateLimited).retryAfterMs)
+        assertFalse(bgBlocked.fromServer429)
+
+        val userAllowed = limiter.tryAcquire(com.example.data.remote.WallhavenRateLimiter.RequestPriority.USER_INTERACTIVE)
+        assertTrue(userAllowed is com.example.data.remote.WallhavenRateLimiter.AcquireResult.Allowed)
+        assertEquals(14, limiter.remainingQuota())
+    }
+
+    @Test
+    fun `AI 4K Artworks is removed and Home Screen prioritizes GitHub Raw R2 JSON with Disk cache and Wallhaven expansion`() = runTest {
+        assertTrue(
+            com.example.domain.model.AnimeCatalog.exploreCategories.none {
+                it.title.contains("AI 4K", ignoreCase = true)
+            },
+        )
+
+        val wallhavenCalls = AtomicInteger(0)
+        val rawCalls = AtomicInteger(0)
+        val cdnCalls = AtomicInteger(0)
+        val sampleDtos = (1..30).map { idx ->
+            com.example.data.remote.StaticCatalogItemDto(
+                id = "r2_static_$idx",
+                imageUrl = "https://pub-demo.r2.dev/static/r2_static_$idx.jpg",
+                thumbnailUrl = "https://pub-demo.r2.dev/static/thumbs/r2_static_$idx.jpg",
+                width = 1080,
+                height = 1920,
+            )
+        }
+        val fakeWallhaven = object : WallhavenService {
+            override suspend fun searchAnime(
+                query: String?,
+                categories: String,
+                purity: String,
+                ratios: String?,
+                atleast: String?,
+                sorting: String,
+                order: String?,
+                topRange: String?,
+                page: Int,
+            ): Response<WallhavenResponse> {
+                val n = wallhavenCalls.incrementAndGet()
+                return Response.success(
+                    WallhavenResponse(
+                        data = listOf(
+                            WallhavenItem(
+                                id = "wh_exp_$n",
+                                path = "https://w.wallhaven.cc/full/wh_exp_$n.jpg",
+                                dimensionX = 1080,
+                                dimensionY = 1920,
+                                thumbs = WallhavenThumbs(
+                                    large = "https://th.wallhaven.cc/lg/wh_exp_$n.jpg",
+                                    original = "https://th.wallhaven.cc/orig/wh_exp_$n.jpg",
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+        val emptyReddit = object : RedditService {
+            override suspend fun searchSubreddit(
+                subreddit: String,
+                query: String,
+                restrictSr: String,
+                sort: String,
+                time: String,
+                limit: Int,
+            ): Response<RedditResponse> = Response.success(RedditResponse())
+        }
+        val fakeCatalogApi = object : LiveCatalogApi {
+            override suspend fun getLiveCatalog(): LiveCatalogResponse = LiveCatalogResponse()
+            override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = LiveCatalogResponse()
+            override suspend fun fetchStaticCatalogCdn(): Response<com.example.data.remote.StaticCatalogResponse> {
+                cdnCalls.incrementAndGet()
+                return Response.success(
+                    com.example.data.remote.StaticCatalogResponse(
+                        version = 1,
+                        total = sampleDtos.size,
+                        items = sampleDtos,
+                    ),
+                )
+            }
+            override suspend fun fetchStaticCatalogRaw(): Response<com.example.data.remote.StaticCatalogResponse> {
+                rawCalls.incrementAndGet()
+                return Response.success(com.example.data.remote.StaticCatalogResponse())
+            }
+        }
+
+        val tempCacheFile = java.io.File.createTempFile("static_catalog_test_", ".json")
+        tempCacheFile.delete()
+        try {
+            val staticRepo = com.example.data.repository.StaticCatalogRepository(
+                api = fakeCatalogApi,
+                catalogCacheFile = tempCacheFile,
+            )
+            val repo = WallpaperRepository(
+                wallhavenApi = fakeWallhaven,
+                redditApi = emptyReddit,
+                wallpaperDao = FakeWallpaperDao(),
+                staticCatalogRepository = staticRepo,
+            )
+
+            // Page 1 & 2 come directly from jsDelivr CDN R2 JSON with 0 GitHub Raw or Wallhaven calls
+            val page1 = repo.getWallpapers(
+                query = WallpaperRepository.HOME_TRENDING_KEY,
+                isLive = false,
+                filter = WallpaperFilter(),
+                page = 1,
+                forceRefresh = false,
+            )
+            assertEquals(24, page1.wallpapers.size)
+            assertTrue(page1.hasMore)
+            assertEquals("r2_static_1", page1.wallpapers.first().id)
+            assertEquals("R2", page1.wallpapers.first().source)
+            assertEquals(1, cdnCalls.get())
+            assertEquals(0, rawCalls.get())
+            assertEquals(0, wallhavenCalls.get())
+            assertTrue(tempCacheFile.exists() && tempCacheFile.length() > 0L)
+
+            val page2 = repo.getWallpapers(
+                query = WallpaperRepository.HOME_TRENDING_KEY,
+                isLive = false,
+                filter = WallpaperFilter(),
+                page = 2,
+                forceRefresh = false,
+            )
+            assertEquals(6, page2.wallpapers.size)
+            assertEquals("r2_static_25", page2.wallpapers.first().id)
+            assertEquals(1, cdnCalls.get())
+            assertEquals(0, wallhavenCalls.get())
+
+            // Page 3 expands smoothly into Wallhaven after all 30 R2 items are shown
+            val page3 = repo.getWallpapers(
+                query = WallpaperRepository.HOME_TRENDING_KEY,
+                isLive = false,
+                filter = WallpaperFilter(),
+                page = 3,
+                forceRefresh = false,
+            )
+            assertTrue(page3.wallpapers.isNotEmpty())
+            assertTrue(wallhavenCalls.get() > 0)
+
+            // Cold start with offline API hydrates instantaneously from LocalCache (0 network calls)
+            val offlineApi = object : LiveCatalogApi {
+                override suspend fun getLiveCatalog(): LiveCatalogResponse = throw IOException("Offline")
+                override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = throw IOException("Offline")
+                override suspend fun fetchStaticCatalogCdn(): Response<com.example.data.remote.StaticCatalogResponse> =
+                    throw IOException("Offline")
+                override suspend fun fetchStaticCatalogRaw(): Response<com.example.data.remote.StaticCatalogResponse> =
+                    throw IOException("Offline")
+            }
+            val coldStaticRepo = com.example.data.repository.StaticCatalogRepository(
+                api = offlineApi,
+                catalogCacheFile = tempCacheFile,
+            )
+            val coldRepo = WallpaperRepository(
+                wallhavenApi = fakeWallhaven,
+                redditApi = emptyReddit,
+                wallpaperDao = FakeWallpaperDao(),
+                staticCatalogRepository = coldStaticRepo,
+            )
+            val instantSnapshot = coldRepo.getCachedWallpapersSnapshot(
+                query = WallpaperRepository.HOME_TRENDING_KEY,
+                isLive = false,
+                filter = WallpaperFilter(),
+                page = 1,
+            )
+            assertEquals(24, instantSnapshot.size)
+            assertEquals("r2_static_1", instantSnapshot.first().id)
+            assertTrue(
+                coldRepo.isFeedCacheFresh(
+                    query = WallpaperRepository.HOME_TRENDING_KEY,
+                    isLive = false,
+                    filter = WallpaperFilter(),
+                    page = 1,
+                ),
+            )
+        } finally {
+            tempCacheFile.delete()
+        }
+    }
+
+    @Test
+    fun `StaticCatalogItemDto resolves WebP R2 URLs across alias keys and derives series cleanly`() = runTest {
+        val webpUrl = "https://pub-d22f9bea4689411daf3cd7670bb7f7ff.r2.dev/wallpapers/black_clover/009e635cb5537fc28da5d5c5.webp"
+        val rawJson = """
+            {
+              "version": 1,
+              "wallpapers": [
+                {
+                  "id": "bc_01",
+                  "url": "  $webpUrl  "
+                }
+              ]
+            }
+        """.trimIndent()
+        val moshi = com.squareup.moshi.Moshi.Builder()
+            .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+            .build()
+        val parsed = moshi.adapter(com.example.data.remote.StaticCatalogResponse::class.java).fromJson(rawJson)
+        val items = parsed?.resolvedItems().orEmpty()
+        assertEquals(1, items.size)
+        assertEquals(webpUrl, items.first().resolvedImageUrl())
+        assertEquals(webpUrl, items.first().resolvedThumbnailUrl())
+
+        val fakeApi = object : LiveCatalogApi {
+            override suspend fun getLiveCatalog(): LiveCatalogResponse = LiveCatalogResponse()
+            override suspend fun getLiveCatalogByUrl(url: String): LiveCatalogResponse = LiveCatalogResponse()
+            override suspend fun fetchStaticCatalogCdn() = Response.success(parsed!!)
+            override suspend fun fetchStaticCatalogRaw() = Response.success(com.example.data.remote.StaticCatalogResponse())
+        }
+        val staticRepo = com.example.data.repository.StaticCatalogRepository(api = fakeApi)
+        val page = staticRepo.getHomePage(filter = WallpaperFilter(), page = 1)
+        assertEquals(1, page.items.size)
+        val wp = page.items.first()
+        assertEquals(webpUrl, wp.imageUrl)
+        assertEquals(webpUrl, wp.thumbnailUrl)
+        assertEquals("Black Clover", wp.animeSeries)
+
+        val candidates = com.example.ui.components.resolveCardImageCandidates(wp)
+        assertEquals(
+            listOf(webpUrl to false, webpUrl to true),
+            candidates,
+        )
+    }
+
+    @Test
+    fun `fetchWallpapersJson tries jsDelivr CDN first and fails over to GitHub Raw with cache buster on forceRefresh`() = runTest {
+        val requestedUrls = mutableListOf<String>()
+        val validJson = """
+            {
+              "version": 1,
+              "total": 1,
+              "items": [
+                {
+                  "id": "cdn_fallback_1",
+                  "imageUrl": "https://pub-d22f9bea4689411daf3cd7670bb7f7ff.r2.dev/wallpapers/naruto/img1.webp",
+                  "thumbnailUrl": "https://pub-d22f9bea4689411daf3cd7670bb7f7ff.r2.dev/wallpapers/naruto/img1.webp",
+                  "width": 2160,
+                  "height": 3840
+                }
+              ]
+            }
+        """.trimIndent()
+        val fakeClient = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val url = chain.request().url.toString()
+                requestedUrls += url
+                if (url.startsWith(com.example.data.repository.StaticCatalogRepository.CDN_URL)) {
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(503)
+                        .message("CDN Unavailable")
+                        .body("".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                } else {
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(validJson.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            }
+            .build()
+
+        val localCache = com.example.data.local.InMemoryWallpaperLocalCache()
+        val fixedTime = 1_732_500_000_000L
+        val staticRepo = com.example.data.repository.StaticCatalogRepository(
+            localCache = localCache,
+            okHttpClient = fakeClient,
+            clock = { fixedTime },
+        )
+
+        val fetched = staticRepo.fetchWallpapersJson(forceRefresh = true)
+        assertEquals(validJson, fetched)
+        assertEquals(validJson, localCache.getJson())
+        assertEquals(2, requestedUrls.size)
+        assertEquals(com.example.data.repository.StaticCatalogRepository.CDN_URL, requestedUrls[0])
+        assertEquals(
+            "${com.example.data.repository.StaticCatalogRepository.FALLBACK_URL}?t=$fixedTime",
+            requestedUrls[1],
+        )
+        assertEquals(1, staticRepo.catalogUpdates.value.size)
+        assertEquals("cdn_fallback_1", staticRepo.catalogUpdates.value.first().id)
+
+        // Verify default fast client timeout is configured to 5 seconds for rapid CDN failover
+        val defaultClient = com.example.data.repository.StaticCatalogRepository.defaultFastCatalogClient()
+        assertEquals(5_000, defaultClient.connectTimeoutMillis)
+        assertEquals(5_000, defaultClient.readTimeoutMillis)
+    }
+
+    @Test
+    fun `BitmapCropper preserves full 4K native resolution and computes exact screen-aspect visibleCropHint`() {
+        // 4K portrait artwork stays 1:1 native (inSampleSize = 1), 8K steps down safely to 2
+        assertEquals(1, com.example.util.BitmapCropper.calculateNativeCeilingSampleSize(2160, 3840))
+        assertEquals(1, com.example.util.BitmapCropper.calculateNativeCeilingSampleSize(1440, 3200))
+        assertEquals(2, com.example.util.BitmapCropper.calculateNativeCeilingSampleSize(7680, 4320))
     }
 }
