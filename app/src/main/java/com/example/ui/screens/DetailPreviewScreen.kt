@@ -344,7 +344,7 @@ fun DetailPreviewScreen(
             ) {
                 WallpaperMediaContent(
                     item = currentWallpaper,
-                    isActive = true,
+                    isActive = !isProcessing,
                     muted = muteLiveAudio,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -852,7 +852,7 @@ private fun CarouselWallpaperCard(
         Box(modifier = Modifier.fillMaxSize()) {
             WallpaperMediaContent(
                 item = item,
-                isActive = isActive,
+                isActive = isActive && !isProcessing,
                 muted = muted,
                 onMediaReadyChanged = { ready -> isMediaReady = ready },
                 modifier = Modifier.fillMaxSize(),
@@ -965,9 +965,9 @@ private fun WallpaperMediaContent(
             null
         } else {
             val appContainer = (context.applicationContext as? com.example.KuroWallApplication)?.container
-            val localFile = appContainer?.liveWallpaperDownloader
-                ?.getLocalFile(item.id)
-                ?.takeIf { it.exists() && it.length() > 0L }
+            val downloader = appContainer?.liveWallpaperDownloader
+            val localFile = downloader?.getCompatLocalFile(item.id)?.takeIf { it.exists() && it.length() > 0L }
+                ?: downloader?.getLocalFile(item.id)?.takeIf { it.exists() && it.length() > 0L }
             localFile?.let { android.net.Uri.fromFile(it).toString() }
                 ?: item.effectivePreviewVideoUrl
         }
@@ -1104,8 +1104,8 @@ private fun LiveMp4FullScreenPlayer(
     val density = LocalDensity.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val latestOnVideoReadyChanged by rememberUpdatedState(onVideoReadyChanged)
-    var isHostStarted by remember {
-        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    var isHostResumed by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
     var useFallbackUrl by remember(videoUrl, fallbackVideoUrl) { mutableStateOf(false) }
     var playbackFailed by remember(videoUrl, fallbackVideoUrl) { mutableStateOf(false) }
@@ -1119,8 +1119,8 @@ private fun LiveMp4FullScreenPlayer(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> isHostStarted = true
-                Lifecycle.Event.ON_STOP -> isHostStarted = false
+                Lifecycle.Event.ON_RESUME -> isHostResumed = true
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> isHostResumed = false
                 else -> Unit
             }
         }
@@ -1130,7 +1130,7 @@ private fun LiveMp4FullScreenPlayer(
         }
     }
 
-    val shouldPlay = isActive && isHostStarted
+    val shouldPlay = isActive && isHostResumed
 
     LaunchedEffect(shouldPlay, activeVideoUrl) {
         if (!shouldPlay) {

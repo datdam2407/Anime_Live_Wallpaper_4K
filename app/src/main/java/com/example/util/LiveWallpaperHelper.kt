@@ -16,14 +16,24 @@ object LiveWallpaperHelper {
         context: Context,
         activeLiveWallpaperPath: String?,
     ): Boolean {
+        val appCtx = context.applicationContext ?: context
         val path = activeLiveWallpaperPath?.trim().orEmpty()
         if (path.isEmpty()) return false
-        val savedFile = File(path)
-        if (savedFile.exists() && savedFile.length() > 0L) {
+        val resolved = MediaDownloadManager.resolveValidInternalFile(
+            rawPath = path,
+            filesRoot = appCtx.filesDir,
+            cacheDir = appCtx.cacheDir,
+            externalCacheDir = appCtx.externalCacheDir,
+        )
+        if (resolved != null) {
             return true
         }
-        val activeSlotFile = MediaDownloadManager.getActiveLiveVideoFile(context)
-        return activeSlotFile.exists() && activeSlotFile.length() > 0L
+        val activeSlotFile = MediaDownloadManager.getActiveLiveVideoFile(appCtx)
+        return com.example.service.VideoCompatibilityInspector.isReliableLocalVideoFile(
+            file = activeSlotFile,
+            cacheDir = appCtx.cacheDir,
+            externalCacheDir = appCtx.externalCacheDir,
+        )
     }
 
     fun isAnimeLiveWallpaperActive(context: Context): Boolean {

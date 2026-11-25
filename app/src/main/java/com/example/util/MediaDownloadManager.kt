@@ -71,27 +71,59 @@ class MediaDownloadManager(
         }
 
         fun getActiveLiveVideoFile(context: Context): File {
-            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val appCtx = context.applicationContext ?: context
+            val filesRoot = appCtx.filesDir
+            val cacheDir = appCtx.cacheDir
+            val externalCacheDir = appCtx.externalCacheDir
+            val prefs = appCtx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             val directPath = prefs.getString(KEY_ACTIVE_FILE_PATH, null)?.trim().orEmpty()
             if (directPath.isNotEmpty()) {
-                val directFile = File(directPath)
-                if (directFile.exists() && directFile.length() > 0L) {
-                    return directFile
+                resolveValidInternalFile(directPath, filesRoot, cacheDir, externalCacheDir)?.let {
+                    return it
                 }
             }
             val rawName = prefs.getString(KEY_ACTIVE_FILE, FILE_SLOT_A)
             val fileName = if (rawName == FILE_SLOT_B) FILE_SLOT_B else FILE_SLOT_A
-            val preferredFile = File(context.filesDir, fileName)
-            if (preferredFile.exists() && preferredFile.length() > 0L) {
+            val preferredFile = File(filesRoot, fileName)
+            if (com.example.service.VideoCompatibilityInspector.isReliableLocalVideoFile(preferredFile, cacheDir, externalCacheDir)) {
                 return preferredFile
             }
             val alternateName = if (fileName == FILE_SLOT_A) FILE_SLOT_B else FILE_SLOT_A
-            val alternateFile = File(context.filesDir, alternateName)
-            if (alternateFile.exists() && alternateFile.length() > 0L) {
+            val alternateFile = File(filesRoot, alternateName)
+            if (com.example.service.VideoCompatibilityInspector.isReliableLocalVideoFile(alternateFile, cacheDir, externalCacheDir)) {
                 return alternateFile
             }
-            val legacyFile = File(context.filesDir, "active_live_wallpaper.mp4")
-            return if (legacyFile.exists() && legacyFile.length() > 0L) legacyFile else preferredFile
+            val legacyFile = File(filesRoot, "active_live_wallpaper.mp4")
+            return if (com.example.service.VideoCompatibilityInspector.isReliableLocalVideoFile(legacyFile, cacheDir, externalCacheDir)) {
+                legacyFile
+            } else {
+                preferredFile
+            }
+        }
+
+        internal fun resolveValidInternalFile(
+            rawPath: String,
+            filesRoot: File,
+            cacheDir: File? = null,
+            externalCacheDir: File? = null,
+        ): File? {
+            val trimmed = rawPath.trim()
+            if (trimmed.isEmpty()) return null
+            val directFile = File(trimmed)
+            if (com.example.service.VideoCompatibilityInspector.isReliableLocalVideoFile(directFile, cacheDir, externalCacheDir)) {
+                return directFile
+            }
+            // Heal /data/data/<pkg>/files vs /data/user/<id>/<pkg>/files symlink or multi-user migrations
+            val leafName = directFile.name.takeIf { it.isNotBlank() } ?: return null
+            val liveDirCandidate = File(File(filesRoot, com.example.data.local.LiveWallpaperDownloader.LIVE_WALLPAPERS_DIR), leafName)
+            if (com.example.service.VideoCompatibilityInspector.isReliableLocalVideoFile(liveDirCandidate, cacheDir, externalCacheDir)) {
+                return liveDirCandidate
+            }
+            val rootCandidate = File(filesRoot, leafName)
+            if (com.example.service.VideoCompatibilityInspector.isReliableLocalVideoFile(rootCandidate, cacheDir, externalCacheDir)) {
+                return rootCandidate
+            }
+            return null
         }
     }
 
@@ -275,7 +307,19 @@ class MediaDownloadManager(
                                 }
                             }
                             outputStream.flush()
+                            runCatching { outputStream.fd.sync() }
                         }
+                    }
+
+                    if (totalBytes > 0L && downloadedBytes != totalBytes) {
+                        emit(LiveDownloadState.Error("Incomplete video download ($downloadedBytes / $totalBytes bytes)"))
+                        return@withLock
+                    }
+                    if (!createdTemp.exists() || createdTemp.length() <= 0L ||
+                        com.example.service.VideoCompatibilityInspector.looksLikeTextErrorPayload(createdTemp)
+                    ) {
+                        emit(LiveDownloadState.Error("Downloaded video payload is invalid"))
+                        return@withLock
                     }
 
                     if (finalFile.exists()) finalFile.delete()

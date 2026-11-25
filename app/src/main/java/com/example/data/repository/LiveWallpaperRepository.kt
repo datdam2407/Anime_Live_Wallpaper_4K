@@ -973,6 +973,19 @@ class LiveWallpaperRepository(
         onProgress: (Int) -> Unit = {},
     ): Result<File> = downloader.downloadIfNeeded(wallpaperId, fullUrl, onProgress)
 
+    suspend fun prepareWallpaperForApply(
+        context: Context,
+        wallpaper: AppWallpaper,
+        onProgress: (Int) -> Unit = {},
+    ): Result<File> = downloader.prepareDeviceCompatibleVideo(
+        context = context,
+        wallpaperId = wallpaper.id,
+        fullUrl = wallpaper.videoUrl.orEmpty(),
+        previewUrl = wallpaper.previewVideoUrl,
+        thumbnailUrl = wallpaper.thumbnailUrl,
+        onProgress = onProgress,
+    )
+
     fun clearDownloadedVideos(
         keepWallpaperId: String? = null,
         keepFilePath: String? = null,

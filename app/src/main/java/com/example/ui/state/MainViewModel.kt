@@ -1995,9 +1995,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            val downloadResult = liveWallpaperRepository.downloadFullVideo(
-                wallpaperId = wallpaper.id,
-                fullUrl = videoUrl,
+            val downloadResult = liveWallpaperRepository.prepareWallpaperForApply(
+                context = getApplication(),
+                wallpaper = wallpaper,
                 onProgress = { percent ->
                     // MutableStateFlow.update is thread-safe when invoked from Dispatchers.IO.
                     _rawState.update { state ->
@@ -2046,6 +2046,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearDownloadedLiveVideos() {
         viewModelScope.launch {
             val activePath = settings.value.activeLiveWallpaperPath
+                ?: MediaDownloadManager.getActiveLiveVideoFile(getApplication()).absolutePath
             val deletedCount = withContext(Dispatchers.IO) {
                 liveWallpaperRepository.clearDownloadedVideos(keepFilePath = activePath)
             }
